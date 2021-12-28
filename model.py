@@ -92,7 +92,9 @@ class NITS(nn.Module):
                 b = params[:,A_end:b_end].reshape(-1, out_features)
                 bs.append(b)
                 cur_idx = b_end
-                if self.constraint_type == 'neg_exp':
+                if i < self.last_layer and self.constraint_type == 'neg_exp':
+                    x = x - (b.unsqueeze(-1) * A).mean(axis=-1)
+                elif i == self.last_layer and self.final_layer_constraint == 'neg_exp':
                     x = x - (b.unsqueeze(-1) * A).mean(axis=-1)
                 else:
                     x = x + b

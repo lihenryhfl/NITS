@@ -29,7 +29,10 @@ class PositiveLinear(nn.Module):
             self.pre_weight, self.bias = nn.Parameter(self.pre_weight), nn.Parameter(self.bias)
 
     def forward(self, x):
-        if self.constraint_type == 'exp':
+        if self.constraint_type == 'neg_exp':
+            weight = 1 / self.pre_weight.exp()
+            return x.mm(weight.T) - (self.bias.unsqueeze(-1) * weight).mean(axis=-1)
+        elif self.constraint_type == 'exp':
             weight = self.pre_weight.exp()
         elif self.constraint_type == 'softmax':
             weight = F.softmax(self.pre_weight, dim=-1)
@@ -55,7 +58,7 @@ class MonotonicInverse(torch.autograd.Function):
         return None, dy
 
 class ModelInverse(nn.Module):
-    def __init__(self, arch, start=0., end=1., store_weights=True,
+    def __init__(self, arch, start=0., end=1., store_weights=True, 
                  constraint_type='exp', monotonic_const=1e-2, final_layer_constraint='softmax'):
         super(ModelInverse, self).__init__()
         self.d = arch[0]
@@ -110,7 +113,7 @@ class ModelInverse(nn.Module):
                     cur_idx += layer.out_features
                 else:
                     layer.bias = torch.zeros(layer.out_features).to(param_tensor.device)
-
+                    
                 i += 1
 
     def apply_layers(self, x):
