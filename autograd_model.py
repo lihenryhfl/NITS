@@ -41,16 +41,30 @@ class PositiveLinear(nn.Module):
         elif self.constraint_type == '':
             weight = self.pre_weight
         return x.mm(weight.T) + self.bias
+    
+def bisection_search(increasing_func, target, start, end, n_iter=20, eps=1e-3):
+    query = (start + end) / 2
+    result = increasing_func(query)
+
+    if n_iter == 0:
+        print("bottomed out recursion depth, return best guess epsilon =", (result - target).norm())
+        return query
+    elif (result - target).norm() < eps:
+        return query
+    elif result > target:
+        return bisection_search(increasing_func, target, start, query, n_iter-1, eps)
+    else:
+        return bisection_search(increasing_func, target, query, end, n_iter-1, eps)
 
 class MonotonicInverse(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, self, input):
+    def forward(ctx, self, input, given_x):
         with torch.no_grad():
-            b = bisection_search(self.F, input, self.start, self.end, n_iter=20)
+            b = bisection_search(self.F, input, self.start_(given_x), self.end_(given_x), n_iter=20)
 
         dy = 1 / torch.autograd.functional.jacobian(self.F, b, create_graph=True, vectorize=True)
-        ctx.save_for_backward(dy.reshape(len(input), 1))
-        return b
+        ctx.save_for_backward(dy.reshape(len(input), -1))
+        return b[:, self.non_conditional_dim].unsqueeze(-1)
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -59,7 +73,8 @@ class MonotonicInverse(torch.autograd.Function):
 
 class ModelInverse(nn.Module):
     def __init__(self, arch, start=0., end=1., store_weights=True, 
-                 constraint_type='exp', monotonic_const=1e-2, final_layer_constraint='softmax'):
+                 constraint_type='exp', monotonic_const=1e-3, 
+                 final_layer_constraint='exp', non_conditional_dim=0):
         super(ModelInverse, self).__init__()
         self.d = arch[0]
         self.monotonic_const = monotonic_const
@@ -69,8 +84,31 @@ class ModelInverse(nn.Module):
         self.last_layer = len(arch) - 2
         self.layers = self.build_layers(arch)
 
-        self.register_buffer('start', torch.tensor(start).reshape(1, 1))
-        self.register_buffer('end', torch.tensor(end).reshape(1, 1))
+        # set start and end tensors
+        assert non_conditional_dim < self.d
+        self.non_conditional_dim = non_conditional_dim
+        self.register_buffer('start_val', torch.tensor(start))
+        self.register_buffer('end_val', torch.tensor(end))
+        
+    def start_(self, x):
+        if x is None:
+            assert self.d == 1
+            start = torch.ones((1, 1)) * self.start_val
+        else:
+            start = x.clone().detach()
+            start[:, self.non_conditional_dim] = self.start_val
+        
+        return start
+    
+    def end_(self, x):
+        if x is None:
+            assert self.d == 1
+            end = torch.ones((1, 1)) * self.end_val
+        else:
+            end = x.clone().detach()
+            end[:, self.non_conditional_dim] = self.end_val
+        
+        return end
 
     def build_layers(self, arch):
         self.n_params = 0
@@ -121,38 +159,34 @@ class ModelInverse(nn.Module):
         for l in self.layers:
             y = l(y)
 
-        return y + self.monotonic_const * x
+        return y + self.monotonic_const * x[:,self.non_conditional_dim].unsqueeze(-1)
 
-    def scale(self, y):
-        start, end = self.apply_layers(self.start), self.apply_layers(self.end)
+    def scale(self, y, x):
+        start, end = self.apply_layers(self.start_(x)), self.apply_layers(self.end_(x))
         return (y - start) / (end - start)
 
     def forward(self, x):
         raise NotImplementedError("forward() should not be used!")
+        
+    def f_primitive(self, x, func):
+        # compute df/dx
+        dy = []
+        for x_ in x:
+            dy_ = torch.autograd.functional.jacobian(func, x_.reshape(-1, self.d), 
+                                                     create_graph=True, vectorize=False)
+            dy.append(dy_.reshape(-1, self.d)[:,self.non_conditional_dim].unsqueeze(-1))
+
+        dy = torch.cat(dy, axis=0)
+        return dy
 
     def f(self, x):
-        # compute df/dx
-        dy = []
-        for x_ in x:
-            dy_ = torch.autograd.functional.jacobian(self.F, x_.reshape(-1, 1), create_graph=True, vectorize=False)
-            dy.append(dy_.reshape(1, 1))
-
-        dy = torch.cat(dy, axis=0)
-        return dy
+        return self.f_primitive(x, self.F)
 
     def f_(self, x):
-        # compute df/dx
-        dy = []
-        for x_ in x:
-            dy_ = torch.autograd.functional.jacobian(self.apply_layers, x_.reshape(-1, 1),
-                                                     create_graph=True, vectorize=False)
-            dy.append(dy_.reshape(1, 1))
-
-        dy = torch.cat(dy, axis=0)
-        return dy
+        return self.f_primitive(x, self.apply_layers)
 
     def F(self, x):
-        return self.scale(self.apply_layers(x))
+        return self.scale(self.apply_layers(x), x)
 
     def pdf(self, x):
         return self.f(x)
@@ -160,39 +194,27 @@ class ModelInverse(nn.Module):
     def cdf(self, x):
         return self.F(x)
 
-    def F_inv(self, x):
+    def F_inv(self, x, given_x=None):
         inverse = MonotonicInverse.apply
 
         z = []
         for x_ in x:
-            z.append(inverse(self, x_).reshape(1, 1))
+            z.append(inverse(self, x_.reshape(1, 1), given_x).reshape(1, 1))
 
         z = torch.cat(z, axis=0)
 
         return z
 
-    def sample(self, n, batch_size=1):
+    def sample(self, n, given_x=None, batch_size=1):
         x = []
         while n > batch_size:
-            z = torch.rand(batch_size, device=self.start.device) * (self.end - self.start) + self.start
+            start, end = self.start_(given_x), self.end_(given_x)
+            z = torch.rand(batch_size, device=self.start_val.device) * (end - start) + start
             x.append(self.F_inv(z.reshape(-1, 1)))
             n -= batch_size
         else:
-            z = torch.rand(n, device=self.start.device) * (self.end - self.start) + self.start
+            start, end = self.start_(given_x), self.end_(given_x)
+            z = torch.rand(n, device=self.start_val.device) * (end - start) + start
             x.append(self.F_inv(z.reshape(-1, 1)))
 
         return torch.cat(x, axis=0)
-
-def bisection_search(increasing_func, target, start, end, n_iter=20, eps=1e-3):
-    query = (start + end) / 2
-    result = increasing_func(query)
-
-    if n_iter == 0:
-        print("bottomed out recursion depth, return best guess epsilon =", (result - target).norm())
-        return query
-    elif (result - target).norm() < eps:
-        return query
-    elif result > target:
-        return bisection_search(increasing_func, target, start, query, n_iter-1, eps)
-    else:
-        return bisection_search(increasing_func, target, query, end, n_iter-1, eps)

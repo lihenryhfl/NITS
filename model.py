@@ -5,12 +5,13 @@ import numpy as np
 
 class NITSMonotonicInverse(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, self, input, params):
+    def forward(ctx, self, input, params, given_x):
         with torch.no_grad():
-            b = self.bisection_search(input, params)
+            b = self.bisection_search(input, params, given_x)
 
         dy = 1 / self.pdf(b, params)
         ctx.save_for_backward(dy.reshape(len(input), -1))
+        b = b[:, self.non_conditional_dim].unsqueeze(-1)
         return b
 
     @staticmethod
@@ -18,10 +19,11 @@ class NITSMonotonicInverse(torch.autograd.Function):
         dy, = ctx.saved_tensors
         return None, dy
 
-class NITS(nn.Module):
-    def __init__(self, arch, start=0., end=1., constraint_type='neg_exp',
-                 monotonic_const=1e-3, activation='sigmoid', final_layer_constraint='softmax'):
-        super(NITS, self).__init__()
+class NITSPrimitive(nn.Module):
+    def __init__(self, arch, start=0., end=1., constraint_type='exp',
+                 monotonic_const=1e-3, activation='sigmoid',
+                 final_layer_constraint='exp', non_conditional_dim=0):
+        super(NITSPrimitive, self).__init__()
         self.arch = arch
         self.monotonic_const = monotonic_const
         self.constraint_type = constraint_type
@@ -38,8 +40,30 @@ class NITS(nn.Module):
                 self.n_params += a2
 
         # set start and end tensors
-        self.register_buffer('start', torch.tensor(start).reshape(1, arch[0]))
-        self.register_buffer('end', torch.tensor(end).reshape(1, arch[0]))
+        self.d = arch[0]
+        assert non_conditional_dim < self.d
+        self.non_conditional_dim = non_conditional_dim
+        self.start_val, self.end_val = start, end
+
+    def start_(self, x):
+        if x is None:
+            assert self.d == 1
+            start = torch.ones((1, 1)) * self.start_val
+        else:
+            start = x.clone().detach()
+            start[:, self.non_conditional_dim] = self.start_val
+
+        return start
+
+    def end_(self, x):
+        if x is None:
+            assert self.d == 1
+            end = torch.ones((1, 1)) * self.end_val
+        else:
+            end = x.clone().detach()
+            end[:, self.non_conditional_dim] = self.end_val
+
+        return end
 
     def apply_constraint(self, A, constraint_type):
         if constraint_type == 'neg_exp':
@@ -64,7 +88,8 @@ class NITS(nn.Module):
             return x
 
     def forward_(self, x, params, return_intermediaries=False):
-        orig_x = x
+        # the monotonic constant is only applied w.r.t. the first input dimension
+        monotonic_x = x[:,self.non_conditional_dim].unsqueeze(-1)
 
         # store pre-activations and weight matrices
         pre_activations = []
@@ -104,8 +129,8 @@ class NITS(nn.Module):
             else:
                 pre_activations.append(x)
                 nonlinearities.append('linear')
-        
-        x = x + self.monotonic_const * orig_x
+
+        x = x + self.monotonic_const * monotonic_x
 
         if return_intermediaries:
             return x, pre_activations, As, bs, nonlinearities
@@ -114,8 +139,8 @@ class NITS(nn.Module):
 
     def cdf(self, x, params, return_intermediaries=False):
         # get scaling factors
-        start = self.forward_(self.start, params)
-        end = self.forward_(self.end, params)
+        start = self.forward_(self.start_(x), params)
+        end = self.forward_(self.end_(x), params)
 
         # compute pre-scaled cdf, then scale
         y, pre_activations, As, bs, nonlinearities = self.forward_(x, params, return_intermediaries=True)
@@ -152,7 +177,8 @@ class NITS(nn.Module):
         for i, (A, pre_activation, nonlinearity) in enumerate(zip(As, pre_activations, nonlinearities)):
             grad = self.fc_gradient(grad, pre_activation, A, activation=nonlinearity)
 
-        return grad
+        # we only want gradients w.r.t. the first input dimension
+        return grad[:,self.non_conditional_dim].unsqueeze(-1)
 
     def backward_(self, x, params):
         y, pre_activations, As, bs, nonlinearities = self.forward_(x, params, return_intermediaries=True)
@@ -168,22 +194,20 @@ class NITS(nn.Module):
 
         return grad + self.monotonic_const * As[0].reshape(-1, 1)
 
-    def sample(self, params):
+    def sample(self, params, given_x=None):
         z = torch.rand((len(params), 1), device=params.device)
-
-        with torch.no_grad():
-            x = self.icdf(z, params)
+        x = self.icdf(z, params, given_x=given_x)
 
         return x
 
-    def icdf(self, z, params):
+    def icdf(self, z, params, given_x=None):
         func = NITSMonotonicInverse.apply
 
-        return func(self, z, params)
+        return func(self, z, params, given_x)
 
-    def bisection_search(self, y, params, eps=1e-3):
-        low = torch.ones((len(y), 1), device=y.device) * self.start
-        high = torch.ones((len(y), 1), device=y.device) * self.end
+    def bisection_search(self, y, params, given_x, eps=1e-3):
+        low = self.start_(given_x)
+        high = self.end_(given_x)
 
         while ((high - low) > eps).any():
             x_hat = (low + high) / 2
@@ -191,23 +215,25 @@ class NITS(nn.Module):
             low = torch.where(y_hat > y, low, x_hat)
             high = torch.where(y_hat > y, x_hat, high)
 
-        return high
+        result = ((high + low) / 2)
 
-class MultiDimNITS(NITS):
+        return result
+
+class NITS(NITSPrimitive):
     def __init__(self, d, arch, start=-2., end=2., constraint_type='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax'):
-        super(MultiDimNITS, self).__init__(arch, start, end,
+        super(NITS, self).__init__(arch, start, end,
                                            constraint_type=constraint_type,
                                            monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint)
         self.d = d
         self.tot_params = self.n_params * d
         self.final_layer_constraint = final_layer_constraint
-        
+
         self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
         self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
-        
-        self.nits = NITS(arch, start, end, 
+
+        self.nits = NITSPrimitive(arch, start, end,
                          constraint_type=constraint_type,
                          monotonic_const=monotonic_const,
                          final_layer_constraint=final_layer_constraint)
@@ -218,60 +244,48 @@ class MultiDimNITS(NITS):
         assert d == self.d
         assert params.shape[1] == self.tot_params
         assert len(x) == len(params) or len(x) == 1 or len(params) == 1
-        
+
         if len(params) == 1:
             params = params.reshape(self.d, self.n_params).tile((n, 1))
         elif len(params) == n:
             params = params.reshape(-1, self.n_params)
         else:
             raise NotImplementedError('len(params) should be 1 or {}, but it is {}.'.format(n, len(params)))
-        
+
         if len(x) == 1:
             x = x.reshape(1, self.d).tile((n, 1)).reshape(-1, 1)
         elif len(x) == n:
             x = x.reshape(-1, 1)
         else:
             raise NotImplementedError('len(params) should be 1 or {}, but it is {}.'.format(n, len(x)))
-            
 
         return x, params
 
-    def forward_(self, x, params, return_intermediaries=False):
+    def apply_conditional_func(self, func, x, params):
         n = max(len(x), len(params))
         x, params = self.multidim_reshape(x, params)
+        result = func(x, params)
 
-        if return_intermediaries:
-            x, pre_activations, As, bs, nonlinearities = self.nits.forward_(x, params, return_intermediaries)
-            x = x.reshape((n, self.d))
-            return x, pre_activations, As, bs, nonlinearities
+        if isinstance(result, tuple):
+            return (result[0].reshape((n, self.d)),) + result[1:]
         else:
-            x = self.nits.forward_(x, params, return_intermediaries)
-            x = x.reshape((n, self.d))
-            return x
+            return result.reshape((n, self.d))
+
+    def forward_(self, x, params, return_intermediaries=False):
+        func = lambda x, params: self.nits.forward_(x, params, return_intermediaries)
+        return self.apply_conditional_func(func, x, params)
 
     def backward_(self, x, params):
-        n = max(len(x), len(params))
-        x, params = self.multidim_reshape(x, params)
-
-        return self.nits.backward_(x, params).reshape((n, self.d))
+        return self.apply_conditional_func(self.nits.backward_, x, params)
 
     def cdf(self, x, params):
-        n = max(len(x), len(params))
-        x, params = self.multidim_reshape(x, params)
-
-        return self.nits.cdf(x, params).reshape((n, self.d))
+        return self.apply_conditional_func(self.nits.cdf, x, params)
 
     def icdf(self, x, params):
-        n = max(len(x), len(params))
-        x, params = self.multidim_reshape(x, params)
-
-        return self.nits.icdf(x, params).reshape((n, self.d))
+        return self.apply_conditional_func(self.nits.icdf, x, params)
 
     def pdf(self, x, params):
-        n = max(len(x), len(params))
-        x, params = self.multidim_reshape(x, params)
-
-        return self.nits.pdf(x, params).reshape((n, self.d))
+        return self.apply_conditional_func(self.nits.pdf, x, params)
 
     def sample(self, n, params):
         if len(params) == 1:
@@ -305,3 +319,114 @@ class MultiDimNITS(NITS):
             cur_idx = next_idx
 
         return params.reshape((n, self.d * self.n_params))
+
+class ConditionalNITS(NITSPrimitive):
+    # TODO: for now, just implement ConditionalNITS such that it sequentially evaluates each dimension
+    # this process is (probably) possible to vectorize, but since we're currently only doing 3 dimensions,
+    # there's no need to speed things up, because we only gain a factor of 3 speedup
+    def __init__(self, d, arch, start=-2., end=2., constraint_type='neg_exp',
+                 monotonic_const=1e-2, final_layer_constraint='softmax',
+                 autoregressive=True):
+        super(ConditionalNITS, self).__init__(arch=arch, start=start, end=end,
+                                           constraint_type=constraint_type,
+                                           monotonic_const=monotonic_const,
+                                           final_layer_constraint=final_layer_constraint)
+        self.d = d
+        self.tot_params = self.n_params * d
+        self.final_layer_constraint = final_layer_constraint
+        self.autoregressive = autoregressive
+
+        self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
+        self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
+
+        assert arch[0] == d
+        self.nits_list = torch.nn.ModuleList()
+        for i in range(self.d):
+            model = NITSPrimitive(arch=arch, start=start, end=end,
+                         constraint_type=constraint_type,
+                         monotonic_const=monotonic_const,
+                         final_layer_constraint=final_layer_constraint,
+                         non_conditional_dim=i)
+            self.nits_list.append(model)
+
+    def causal_mask(self, x, i):
+        if self.autoregressive:
+            x = x.clone()
+            x[:,i+1:] = 0.
+        return x
+
+    def apply_conditional_func(self, func, x, params):
+        n = max(len(x), len(params))
+        result = func(x, params)
+
+        if isinstance(result, tuple):
+            return (result[0].reshape((n, -1)),) + result[1:]
+        else:
+            return result.reshape((n, -1))
+
+    def forward_(self, x, params, return_intermediaries=False):
+        result = []
+        for i in range(self.d):
+            x_masked = self.causal_mask(x, i)
+            start_idx, end_idx = i * self.n_params, (i + 1) * self.n_params
+            func = lambda x, params: self.nits_list[i].forward_(x, params, return_intermediaries)
+            result.append(self.apply_conditional_func(func, x_masked, params[:,start_idx:end_idx]))
+
+        result = torch.cat(result, axis=1)
+        return result
+
+    def backward_(self, x, params):
+        result = []
+        for i in range(self.d):
+            x_masked = self.causal_mask(x, i)
+            start_idx, end_idx = i * self.n_params, (i + 1) * self.n_params
+            func = self.nits_list[i].backward_
+            result.append(self.apply_conditional_func(func, x_masked, params[:,start_idx:end_idx]))
+
+        result = torch.cat(result, axis=1)
+        return result
+
+    def cdf(self, x, params):
+        result = []
+        for i in range(self.d):
+            x_masked = self.causal_mask(x, i)
+            start_idx, end_idx = i * self.n_params, (i + 1) * self.n_params
+            func = self.nits_list[i].cdf
+            result.append(self.apply_conditional_func(func, x_masked, params[:,start_idx:end_idx]))
+
+        result = torch.cat(result, axis=1)
+        return result
+
+    def pdf(self, x, params):
+        result = []
+        for i in range(self.d):
+            x_masked = self.causal_mask(x, i)
+            start_idx, end_idx = i * self.n_params, (i + 1) * self.n_params
+            func = self.nits_list[i].pdf
+            result.append(self.apply_conditional_func(func, x_masked, params[:,start_idx:end_idx]))
+
+        result = torch.cat(result, axis=1)
+        return result
+
+    def icdf(self, x, params, given_x=None):
+        if self.autoregressive and given_x is not None:
+            raise NotImplementedError('given_x cannot be supplied if autoregressive == True')
+
+        result = []
+        for i in range(self.d):
+            if self.autoregressive:
+                given_x = torch.cat(result + [torch.zeros(len(x), self.d - len(result))], axis=1)
+            start_idx, end_idx = i * self.n_params, (i + 1) * self.n_params
+            func = lambda x, params: self.nits_list[i].icdf(x, params, given_x=given_x)
+            result.append(self.apply_conditional_func(func, x, params[:,start_idx:end_idx]))
+
+        result = torch.cat(result, axis=1)
+        return result
+
+    def sample(self, n, params):
+        if len(params) == 1:
+            params = params.reshape(self.d, self.n_params).tile((n, 1))
+        elif len(params) == n:
+            params = params.reshape(-1, self.n_params)
+        raise NotImplementedError()
+        return self.nits.sample(params).reshape((-1, self.d))
