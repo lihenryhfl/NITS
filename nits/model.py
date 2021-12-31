@@ -412,7 +412,7 @@ class ConditionalNITS(NITSPrimitive):
     def icdf(self, x, params, given_x=None):
         if self.autoregressive and given_x is not None:
             raise NotImplementedError('given_x cannot be supplied if autoregressive == True')
-
+        
         result = []
         for i in range(self.d):
             if self.autoregressive:
@@ -426,8 +426,14 @@ class ConditionalNITS(NITSPrimitive):
 
     def sample(self, n, params):
         if len(params) == 1:
-            params = params.reshape(self.d, self.n_params).tile((n, 1))
+            params = params.reshape(self.d, self.tot_params).tile((n, 1))
         elif len(params) == n:
-            params = params.reshape(-1, self.n_params)
+            params = params.reshape(-1, self.tot_params)
+        elif n == 1:
+            n = len(params)
+        else:
+            raise NotImplementedError("Either n == len(params) or one of n, len(params) must be 1. ")
             
-        return self.nits.sample(params).reshape((-1, self.d))
+        z = torch.rand((n, self.d)).to(params.device)
+            
+        return self.icdf(z, params)

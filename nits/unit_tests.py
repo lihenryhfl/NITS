@@ -7,7 +7,7 @@ device = 'cuda:5'
 
 n = 32
 start, end = -2., 2.
-arch = [1, 8, 1]
+arch = [1, 8, 8, 1]
 monotonic_const = 1e-2
 
 print("Testing NITS.")
@@ -149,7 +149,7 @@ for d in [1, 2, 10]:
             outs = model.pdf(z[0:1], params)
             assert torch.allclose(autograd_outs, outs, atol=1e-4)
 
-from discretized_mol import *
+from nits.discretized_mol import *
 print("Testing arch = [1, 10, 1], 'neg_exp' constraint_type, 'softmax' final_layer_constraint " \
       "against discretized mixture of logistics.")
 
@@ -179,7 +179,7 @@ print("Testing Conditional NITS.")
 start, end = -2., 2.
 monotonic_const = 1e-2
 d = 4
-c_arch = [d, 8, 1]
+c_arch = [d, 8, 8, 1]
 constraint_type = 'exp'
 final_layer_constraint = 'softmax'
 device = 'cpu'
@@ -267,8 +267,6 @@ print("All tests passed!")
 print('Testing autoregressive conditional NITS.')
 start, end = -2., 2.
 monotonic_const = 1e-2
-d = 2
-c_arch = [d, 8, 1]
 constraint_type = 'exp'
 final_layer_constraint = 'softmax'
 device = 'cpu'

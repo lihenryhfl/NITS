@@ -116,21 +116,19 @@ def discretized_nits_loss(x, l, arch, nits_model):
     x = x.contiguous()
 
     nits_model = nits_model.to(x.device)
-    x = x.reshape(-1, 1)
-    params = l.reshape(-1, nits_model.n_params)
+    x = x.reshape(-1, nits_model.d)
+    params = l.reshape(-1, nits_model.tot_params)
 
     x_plus = (x * 127.5 + .5).round() / 127.5
     x_min = (x * 127.5 - .5).round() / 127.5
 
     cdf_delta = nits_model.cdf(x_plus, params) - nits_model.cdf(x_min, params)
-#     cdf_delta = nits_model.forward_(x_plus, params) - nits_model.forward_(x_min, params)
     log_cdf_plus = nits_model.cdf(x_plus, params).log()
     log_one_minus_cdf_min = (1 - nits_model.cdf(x_min, params)).log()
     log_pdf_mid = nits_model.pdf(x, params).log()
 
     inner_inner_cond = (cdf_delta > 1e-5).float()
     inner_inner_out  = inner_inner_cond * torch.log(torch.clamp(cdf_delta, min=1e-12)) + (1. - inner_inner_cond) * (log_pdf_mid - np.log(127.5))
-#     inner_inner_out = cdf_delta.log()
     inner_cond       = (x > 0.999).float()
     inner_out        = inner_cond * log_one_minus_cdf_min + (1. - inner_cond) * inner_inner_out
     cond             = (x < -0.999).float()
@@ -142,14 +140,14 @@ def nits_sample(params, arch, i, j, nits_model):
     params = params.permute(0, 2, 3, 1)
     batch_size, height, width, params_per_pixel = params.shape
 
-    nits_model= nits_model.to(params.device)
+    nits_model = nits_model.to(params.device)
 
     n_params = nits_model.n_params
     n_channels = int(params_per_pixel / n_params)
 
-    data = torch.zeros((batch_size, n_channels, height, width)).to(params.device)
+    data = torch.zeros((batch_size, n_channels, height, width))
 
-    imgs = nits_model.sample(1, params[:,i,j,:].reshape(-1, n_params)).clamp(min=-1., max=1.)
+    imgs = nits_model.sample(1, params[:,i,j,:].reshape(-1, nits_model.tot_params)).clamp(min=-1., max=1.)
     data[:,:,i,j] = imgs.reshape((batch_size, n_channels))
 
     return data
