@@ -147,7 +147,7 @@ def nits_sample(params, arch, i, j, nits_model):
     n_params = nits_model.n_params
     n_channels = int(params_per_pixel / n_params)
 
-    data = torch.zeros((batch_size, n_channels, height, width))
+    data = torch.zeros((batch_size, n_channels, height, width)).to(params.device)
 
     imgs = nits_model.sample(1, params[:,i,j,:].reshape(-1, n_params)).clamp(min=-1., max=1.)
     data[:,:,i,j] = imgs.reshape((batch_size, n_channels))

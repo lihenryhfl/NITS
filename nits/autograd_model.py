@@ -41,7 +41,7 @@ class PositiveLinear(nn.Module):
         elif self.constraint_type == '':
             weight = self.pre_weight
         return x.mm(weight.T) + self.bias
-    
+
 def bisection_search(increasing_func, target, start, end, n_iter=20, eps=1e-3):
     query = (start + end) / 2
     result = increasing_func(query)
@@ -72,8 +72,8 @@ class MonotonicInverse(torch.autograd.Function):
         return None, dy
 
 class ModelInverse(nn.Module):
-    def __init__(self, arch, start=0., end=1., store_weights=True, 
-                 constraint_type='exp', monotonic_const=1e-3, 
+    def __init__(self, arch, start=0., end=1., store_weights=True,
+                 constraint_type='exp', monotonic_const=1e-3,
                  final_layer_constraint='exp', non_conditional_dim=0):
         super(ModelInverse, self).__init__()
         self.d = arch[0]
@@ -89,25 +89,25 @@ class ModelInverse(nn.Module):
         self.non_conditional_dim = non_conditional_dim
         self.register_buffer('start_val', torch.tensor(start))
         self.register_buffer('end_val', torch.tensor(end))
-        
+
     def start_(self, x):
         if x is None:
             assert self.d == 1
-            start = torch.ones((1, 1)) * self.start_val
+            start = torch.ones((1, 1), device=self.start_val.device) * self.start_val
         else:
             start = x.clone().detach()
             start[:, self.non_conditional_dim] = self.start_val
-        
+
         return start
-    
+
     def end_(self, x):
         if x is None:
             assert self.d == 1
-            end = torch.ones((1, 1)) * self.end_val
+            end = torch.ones((1, 1), device=self.start_val.device) * self.end_val
         else:
             end = x.clone().detach()
             end[:, self.non_conditional_dim] = self.end_val
-        
+
         return end
 
     def build_layers(self, arch):
@@ -151,7 +151,7 @@ class ModelInverse(nn.Module):
                     cur_idx += layer.out_features
                 else:
                     layer.bias = torch.zeros(layer.out_features).to(param_tensor.device)
-                    
+
                 i += 1
 
     def apply_layers(self, x):
@@ -167,12 +167,12 @@ class ModelInverse(nn.Module):
 
     def forward(self, x):
         raise NotImplementedError("forward() should not be used!")
-        
+
     def f_primitive(self, x, func):
         # compute df/dx
         dy = []
         for x_ in x:
-            dy_ = torch.autograd.functional.jacobian(func, x_.reshape(-1, self.d), 
+            dy_ = torch.autograd.functional.jacobian(func, x_.reshape(-1, self.d),
                                                      create_graph=True, vectorize=False)
             dy.append(dy_.reshape(-1, self.d)[:,self.non_conditional_dim].unsqueeze(-1))
 

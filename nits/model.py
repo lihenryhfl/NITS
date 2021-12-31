@@ -43,12 +43,13 @@ class NITSPrimitive(nn.Module):
         self.d = arch[0]
         assert non_conditional_dim < self.d
         self.non_conditional_dim = non_conditional_dim
-        self.start_val, self.end_val = start, end
+        self.register_buffer('start_val', torch.tensor(start))
+        self.register_buffer('end_val', torch.tensor(end))
 
     def start_(self, x):
         if x is None:
             assert self.d == 1
-            start = torch.ones((1, 1)) * self.start_val
+            start = torch.ones((1, 1), device=self.start_val.device) * self.start_val
         else:
             start = x.clone().detach()
             start[:, self.non_conditional_dim] = self.start_val
@@ -58,7 +59,7 @@ class NITSPrimitive(nn.Module):
     def end_(self, x):
         if x is None:
             assert self.d == 1
-            end = torch.ones((1, 1)) * self.end_val
+            end = torch.ones((1, 1), device=self.start_val.device) * self.end_val
         else:
             end = x.clone().detach()
             end[:, self.non_conditional_dim] = self.end_val
@@ -67,9 +68,9 @@ class NITSPrimitive(nn.Module):
 
     def apply_constraint(self, A, constraint_type):
         if constraint_type == 'neg_exp':
-            A = (-A).exp()
+            A = (-A.clamp(min=-7.)).exp()
         if constraint_type == 'exp':
-            A = A.exp()
+            A = A.clamp(max=7.).exp()
         elif constraint_type == 'clamp':
             A = A.clamp(min=0.)
         elif constraint_type == 'softmax':
@@ -428,5 +429,5 @@ class ConditionalNITS(NITSPrimitive):
             params = params.reshape(self.d, self.n_params).tile((n, 1))
         elif len(params) == n:
             params = params.reshape(-1, self.n_params)
-        raise NotImplementedError()
+            
         return self.nits.sample(params).reshape((-1, self.d))

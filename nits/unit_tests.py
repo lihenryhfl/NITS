@@ -2,7 +2,8 @@ import torch
 from nits.model import *
 from nits.autograd_model import *
 
-device = 'cpu'
+# device = 'cpu'
+device = 'cuda:5'
 
 n = 32
 start, end = -2., 2.
@@ -51,7 +52,7 @@ for d in [1, 2, 10]:
             ############################
             autograd_model = ModelInverse(arch=arch, start=start, end=end, store_weights=False,
                                           constraint_type=constraint_type, monotonic_const=monotonic_const,
-                                          final_layer_constraint=final_layer_constraint)
+                                          final_layer_constraint=final_layer_constraint).to(device)
 
             def zs_params_to_forwards(zs, params):
                 out = []
@@ -177,7 +178,7 @@ print("All tests passed!")
 print("Testing Conditional NITS.")
 start, end = -2., 2.
 monotonic_const = 1e-2
-d = 2
+d = 4
 c_arch = [d, 8, 1]
 constraint_type = 'exp'
 final_layer_constraint = 'softmax'
@@ -188,8 +189,8 @@ c_model = ConditionalNITS(d=d, start=start, end=end, arch=c_arch,
                           final_layer_constraint=final_layer_constraint,
                           autoregressive=False).to(device)
 
-c_params = torch.randn((n, c_model.tot_params))
-z = torch.linspace(start, end, steps=n, device=device)[:,None].tile((1, d))
+c_params = torch.randn((n, c_model.tot_params)).to(device)
+z = torch.linspace(start, end, steps=n, device=device)[:,None].tile((1, d)).to(device)
 
 def cond_zs_params_to_cdfs(zs, params):
     out = []
@@ -198,7 +199,7 @@ def cond_zs_params_to_cdfs(zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            constraint_type=constraint_type, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_)
+                                           non_conditional_dim=d_).to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
             out.append(c_autograd_model.cdf(z[None,:]))
@@ -217,7 +218,7 @@ def cond_zs_params_to_pdfs(zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            constraint_type=constraint_type, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_)
+                                           non_conditional_dim=d_).to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
             out.append(c_autograd_model.pdf(z[None,:]))
@@ -238,7 +239,7 @@ def cond_zs_params_to_icdfs(ys, zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            constraint_type=constraint_type, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_)
+                                           non_conditional_dim=d_).to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
             out.append(c_autograd_model.F_inv(y[d_:d_+1][None,:], given_x=z[None,:]))
@@ -277,8 +278,8 @@ c_model = ConditionalNITS(d=d, start=start, end=end, arch=c_arch,
                           final_layer_constraint=final_layer_constraint,
                           autoregressive=True).to(device)
 
-c_params = torch.randn((n, c_model.tot_params))
-z = torch.linspace(start, end, steps=n, device=device)[:,None].tile((1, d))
+c_params = torch.randn((n, c_model.tot_params)).to(device)
+z = torch.linspace(start, end, steps=n, device=device)[:,None].tile((1, d)).to(device)
 
 def causal_mask(x, i):
     x = x.clone()[None,:]
@@ -292,7 +293,7 @@ def cond_zs_params_to_cdfs(zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            constraint_type=constraint_type, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_)
+                                           non_conditional_dim=d_).to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -314,7 +315,7 @@ def cond_zs_params_to_pdfs(zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            constraint_type=constraint_type, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_)
+                                           non_conditional_dim=d_).to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -338,7 +339,7 @@ def cond_zs_params_to_icdfs(ys, zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            constraint_type=constraint_type, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_)
+                                           non_conditional_dim=d_).to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
