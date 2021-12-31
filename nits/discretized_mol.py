@@ -20,7 +20,7 @@ def log_prob_from_logits(x):
     m, _ = torch.max(x, dim=axis, keepdim=True)
     return x - m - torch.log(torch.sum(torch.exp(x - m), dim=axis, keepdim=True))
 
-def discretized_mix_logistic_loss_1d3(x, l):
+def discretized_mix_logistic_loss_1d(x, l):
     """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
     # Pytorch ordering
     x = x.permute(0, 2, 3, 1)
@@ -69,7 +69,7 @@ def discretized_mix_logistic_loss_1d3(x, l):
 #     return log_sum_exp(log_probs)
     return -torch.sum(log_sum_exp(log_probs))
 
-def sample_from_discretized_mix_logistic_1d2(l, nr_mix):
+def sample_from_discretized_mix_logistic_1d(l, nr_mix):
     # Pytorch ordering
     l = l.permute(0, 2, 3, 1)
     ls = [int(y) for y in l.size()]

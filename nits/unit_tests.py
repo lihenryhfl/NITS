@@ -1,6 +1,6 @@
 import torch
-from model import *
-from autograd_model import *
+from nits.model import *
+from nits.autograd_model import *
 
 device = 'cpu'
 
@@ -158,7 +158,7 @@ model = NITS(d=1, start=-1e5, end=1e5, arch=[1, 10, 1],
 params = torch.randn((n, model.n_params, 1, 1))
 z = torch.randn((n, 1, 1, 1))
 
-loss1 = discretized_mix_logistic_loss_1d3(z, params)
+loss1 = discretized_mix_logistic_loss_1d(z, params)
 loss2 = discretized_nits_loss(z, params, arch=[1, 10, 1], nits_model=model)
 
 assert (loss1 - loss2).norm() < 1e-2, (loss1 - loss2).norm()
@@ -167,7 +167,7 @@ model = NITS(d=1, start=-1e7, end=1e7, arch=[1, 10, 1],
                      monotonic_const=0., constraint_type='neg_exp',
                      final_layer_constraint='softmax').to(device)
 
-loss1 = discretized_mix_logistic_loss_1d3(z, params)
+loss1 = discretized_mix_logistic_loss_1d(z, params)
 loss2 = discretized_nits_loss(z, params, arch=[1, 10, 1], nits_model=model)
 
 assert (loss1 - loss2).norm() < 1e-3, (loss1 - loss2).norm()
