@@ -4,10 +4,12 @@ import torch.nn.functional as F
 import numpy as np
 
 class PositiveLinear(nn.Module):
-    def __init__(self, in_features, out_features, A_constraint='exp', b_constraint='', store_weights=True):
+    def __init__(self, in_features, out_features, A_constraint='exp', b_constraint='', 
+                 store_weights=True, non_conditional_dim=0):
         super(PositiveLinear, self).__init__()
         self.A_constraint, self.b_constraint = A_constraint, b_constraint
         self.in_features, self.out_features = in_features, out_features
+        self.non_conditional_dim = non_conditional_dim
 
         if store_weights:
             # initialize weight in Unif(+eps, sqrt(k)), i.e. log_weight in Unif(log(eps), log(sqrt(k)))
@@ -33,6 +35,10 @@ class PositiveLinear(nn.Module):
             bias = self.bias
         elif self.b_constraint == 'tanh':
             bias = self.bias.tanh()
+        elif self.b_constraint == 'tanh_conditional':
+            d_ = self.non_conditional_dim
+            b = self.bias
+            bias = torch.cat([b[:d_].tanh(), b[d_:d_+1], b[d_+1:].tanh()], axis=0)
         
         if self.A_constraint == 'neg_exp':
             weight = 1 / self.pre_weight.exp()
@@ -90,13 +96,14 @@ class ModelInverse(nn.Module):
         self.b_constraint = b_constraint
         self.final_layer_constraint = final_layer_constraint
         self.last_layer = len(arch) - 2
-        self.layers = self.build_layers(arch)
-
+        
         # set start and end tensors
         assert non_conditional_dim < self.d
         self.non_conditional_dim = non_conditional_dim
         self.register_buffer('start_val', torch.tensor(start))
         self.register_buffer('end_val', torch.tensor(end))
+        
+        self.layers = self.build_layers(arch)
 
     def start_(self, x):
         if x is None:
@@ -127,7 +134,9 @@ class ModelInverse(nn.Module):
             self.n_params += (a1 * a2)
             if i < self.last_layer:
                 layers.append(PositiveLinear(a1, a2, store_weights=self.store_weights,
-                                         A_constraint=self.A_constraint, b_constraint=self.b_constraint))
+                                             A_constraint=self.A_constraint, 
+                                             b_constraint=self.b_constraint,
+                                             non_conditional_dim=self.non_conditional_dim))
                 layers.append(nn.Sigmoid())
                 self.n_params += a2
             else:

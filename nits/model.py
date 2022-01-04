@@ -84,9 +84,9 @@ class NITSPrimitive(nn.Module):
     
     def apply_b_constraint(self, b, constraint):
         if constraint == 'tanh_conditional':
-            mask = torch.ones_like(b, dtype=bool)
-            mask[:, self.non_conditional_dim] = False
-            return b[mask].tanh() + b[mask.logical_not()]
+            d_ = self.non_conditional_dim
+            b = torch.cat([b[:, :d_].tanh(), b[:, d_:d_+1], b[:, d_+1:].tanh()], axis=1)
+            return b
         elif constraint == 'tanh':
             b = b.tanh()
         elif constraint == '':
@@ -353,7 +353,7 @@ class ConditionalNITS(NITSPrimitive):
         self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
         self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
         
-        self.b_constraint = 'tanh' if self.autoregressive else ''
+        self.b_constraint = 'tanh_conditional' if self.autoregressive else ''
 
         assert arch[0] == d
         self.nits_list = torch.nn.ModuleList()

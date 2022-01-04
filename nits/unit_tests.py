@@ -293,7 +293,7 @@ def cond_zs_params_to_cdfs(zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_, b_constraint='tanh').to(device)
+                                           non_conditional_dim=d_, b_constraint='tanh_conditional').to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -315,7 +315,7 @@ def cond_zs_params_to_pdfs(zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_, b_constraint='tanh').to(device)
+                                           non_conditional_dim=d_, b_constraint='tanh_conditional').to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -339,7 +339,7 @@ def cond_zs_params_to_icdfs(ys, zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_, b_constraint='tanh').to(device)
+                                           non_conditional_dim=d_, b_constraint='tanh_conditional').to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -361,5 +361,3 @@ assert torch.allclose(cond_zs_params_to_cdfs(autograd_outs, c_params), y, atol=1
 print("All tests passed!")
 
 print("Passed all unit tests!")
-
-
