@@ -103,7 +103,7 @@ def sample_from_discretized_mix_logistic_1d(l, nr_mix):
 
 # NITS FUNCTIONS
 
-def discretized_nits_loss(x, l, arch, nits_model):
+def discretized_nits_loss(x, l, nits_model):
     """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
     # Pytorch ordering
     x = x.permute(0, 2, 3, 1)
@@ -136,18 +136,18 @@ def discretized_nits_loss(x, l, arch, nits_model):
 
     return -log_probs.sum()
 
-def nits_sample(params, arch, i, j, nits_model):
+def nits_sample(params, nits_model):
     params = params.permute(0, 2, 3, 1)
     batch_size, height, width, params_per_pixel = params.shape
 
     nits_model = nits_model.to(params.device)
 
-    n_params = nits_model.n_params
-    n_channels = int(params_per_pixel / n_params)
+    n_channels = int(params_per_pixel / nits_model.n_params)
+    
+    assert n_channels == nits_model.d
+    
+    imgs = nits_model.sample(1, params.reshape(-1, nits_model.tot_params)).clamp(min=-1., max=1.)
+    
+    imgs = imgs.reshape(batch_size, height, width, n_channels).permute(0, 3, 1, 2)
 
-    data = torch.zeros((batch_size, n_channels, height, width))
-
-    imgs = nits_model.sample(1, params[:,i,j,:].reshape(-1, nits_model.tot_params)).clamp(min=-1., max=1.)
-    data[:,:,i,j] = imgs.reshape((batch_size, n_channels))
-
-    return data
+    return imgs

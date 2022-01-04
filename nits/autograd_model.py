@@ -4,9 +4,9 @@ import torch.nn.functional as F
 import numpy as np
 
 class PositiveLinear(nn.Module):
-    def __init__(self, in_features, out_features, constraint_type='clamp', store_weights=True):
+    def __init__(self, in_features, out_features, A_constraint='exp', b_constraint='', store_weights=True):
         super(PositiveLinear, self).__init__()
-        self.constraint_type = constraint_type
+        self.A_constraint, self.b_constraint = A_constraint, b_constraint
         self.in_features, self.out_features = in_features, out_features
 
         if store_weights:
@@ -14,11 +14,11 @@ class PositiveLinear(nn.Module):
             # where k = 1 / in_features
             pre_weight = torch.rand((out_features, in_features))
 
-            if self.constraint_type == 'exp':
+            if self.A_constraint == 'exp':
                 init_min, init_max = np.log(1e-2), np.log(np.sqrt(1 / in_features))
-            elif self.constraint_type == 'clamp':
+            elif self.A_constraint == 'clamp':
                 init_min, init_max = 1e-2, np.sqrt(1 / in_features)
-            elif self.constraint_type == '':
+            elif self.A_constraint == '':
                 init_min, init_max = -np.sqrt(1 / in_features), np.sqrt(1 / in_features)
             self.pre_weight = (pre_weight * (init_max - init_min)) + init_min
 
@@ -29,18 +29,24 @@ class PositiveLinear(nn.Module):
             self.pre_weight, self.bias = nn.Parameter(self.pre_weight), nn.Parameter(self.bias)
 
     def forward(self, x):
-        if self.constraint_type == 'neg_exp':
+        if self.b_constraint == '':
+            bias = self.bias
+        elif self.b_constraint == 'tanh':
+            bias = self.bias.tanh()
+        
+        if self.A_constraint == 'neg_exp':
             weight = 1 / self.pre_weight.exp()
-            return x.mm(weight.T) - (self.bias.unsqueeze(-1) * weight).mean(axis=-1)
-        elif self.constraint_type == 'exp':
+            return x.mm(weight.T) - (bias.unsqueeze(-1) * weight).mean(axis=-1)
+        elif self.A_constraint == 'exp':
             weight = self.pre_weight.exp()
-        elif self.constraint_type == 'softmax':
+        elif self.A_constraint == 'softmax':
             weight = F.softmax(self.pre_weight, dim=-1)
-        elif self.constraint_type == 'clamp':
+        elif self.A_constraint == 'clamp':
             weight = self.pre_weight.clamp(min=0.)
-        elif self.constraint_type == '':
+        elif self.A_constraint == '':
             weight = self.pre_weight
-        return x.mm(weight.T) + self.bias
+            
+        return x.mm(weight.T) + bias
 
 def bisection_search(increasing_func, target, start, end, n_iter=20, eps=1e-3):
     query = (start + end) / 2
@@ -73,13 +79,15 @@ class MonotonicInverse(torch.autograd.Function):
 
 class ModelInverse(nn.Module):
     def __init__(self, arch, start=0., end=1., store_weights=True,
-                 constraint_type='exp', monotonic_const=1e-3,
-                 final_layer_constraint='exp', non_conditional_dim=0):
+                 A_constraint='exp', monotonic_const=1e-3,
+                 final_layer_constraint='exp', non_conditional_dim=0,
+                 b_constraint=''):
         super(ModelInverse, self).__init__()
         self.d = arch[0]
         self.monotonic_const = monotonic_const
         self.store_weights = store_weights
-        self.constraint_type = constraint_type
+        self.A_constraint = A_constraint
+        self.b_constraint = b_constraint
         self.final_layer_constraint = final_layer_constraint
         self.last_layer = len(arch) - 2
         self.layers = self.build_layers(arch)
@@ -119,12 +127,12 @@ class ModelInverse(nn.Module):
             self.n_params += (a1 * a2)
             if i < self.last_layer:
                 layers.append(PositiveLinear(a1, a2, store_weights=self.store_weights,
-                                         constraint_type=self.constraint_type))
+                                         A_constraint=self.A_constraint, b_constraint=self.b_constraint))
                 layers.append(nn.Sigmoid())
                 self.n_params += a2
             else:
                 layers.append(PositiveLinear(a1, a2, store_weights=self.store_weights,
-                                         constraint_type=self.final_layer_constraint))
+                                         A_constraint=self.final_layer_constraint))
                 if self.final_layer_constraint != 'softmax':
                     layers.append(nn.Sigmoid())
                     self.n_params += a2

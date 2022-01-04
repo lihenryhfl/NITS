@@ -2,31 +2,33 @@ import torch
 from nits.model import *
 from nits.autograd_model import *
 
-# device = 'cpu'
-device = 'cuda:5'
+device = 'cpu'
+# device = 'cuda:2'
+
+base_arch = [8, 1]
 
 n = 32
 start, end = -2., 2.
-arch = [1, 8, 8, 1]
+arch = [1] + base_arch
 monotonic_const = 1e-2
 
 print("Testing NITS.")
 
 for d in [1, 2, 10]:
-    for constraint_type in ['neg_exp', 'exp']:
+    for A_constraint in ['neg_exp', 'exp']:
         for final_layer_constraint in ['softmax', 'exp']:
 #             print("""
 #             Testing configuration:
 #                 d: {}
-#                 constraint_type: {}
+#                 A_constraint: {}
 #                 final_layer_constraint: {}
-#                   """.format(d, constraint_type, final_layer_constraint))
+#                   """.format(d, A_constraint, final_layer_constraint))
             ############################
             # DEFINE MODELS            #
             ############################
 
             model = NITS(d=d, start=start, end=end, arch=arch,
-                                 monotonic_const=monotonic_const, constraint_type=constraint_type,
+                                 monotonic_const=monotonic_const, A_constraint=A_constraint,
                                  final_layer_constraint=final_layer_constraint).to(device)
             params = torch.randn((n, d * model.n_params)).to(device)
 
@@ -51,7 +53,7 @@ for d in [1, 2, 10]:
             # COMPARE TO AUTOGRAD NITS #
             ############################
             autograd_model = ModelInverse(arch=arch, start=start, end=end, store_weights=False,
-                                          constraint_type=constraint_type, monotonic_const=monotonic_const,
+                                          A_constraint=A_constraint, monotonic_const=monotonic_const,
                                           final_layer_constraint=final_layer_constraint).to(device)
 
             def zs_params_to_forwards(zs, params):
@@ -150,26 +152,26 @@ for d in [1, 2, 10]:
             assert torch.allclose(autograd_outs, outs, atol=1e-4)
 
 from nits.discretized_mol import *
-print("Testing arch = [1, 10, 1], 'neg_exp' constraint_type, 'softmax' final_layer_constraint " \
+print("Testing arch = [1, 10, 1], 'neg_exp' A_constraint, 'softmax' final_layer_constraint " \
       "against discretized mixture of logistics.")
 
 model = NITS(d=1, start=-1e5, end=1e5, arch=[1, 10, 1],
-                     monotonic_const=0., constraint_type='neg_exp',
+                     monotonic_const=0., A_constraint='neg_exp',
                      final_layer_constraint='softmax').to(device)
 params = torch.randn((n, model.n_params, 1, 1))
 z = torch.randn((n, 1, 1, 1))
 
 loss1 = discretized_mix_logistic_loss_1d(z, params)
-loss2 = discretized_nits_loss(z, params, arch=[1, 10, 1], nits_model=model)
+loss2 = discretized_nits_loss(z, params, nits_model=model)
 
 assert (loss1 - loss2).norm() < 1e-2, (loss1 - loss2).norm()
 
 model = NITS(d=1, start=-1e7, end=1e7, arch=[1, 10, 1],
-                     monotonic_const=0., constraint_type='neg_exp',
+                     monotonic_const=0., A_constraint='neg_exp',
                      final_layer_constraint='softmax').to(device)
 
 loss1 = discretized_mix_logistic_loss_1d(z, params)
-loss2 = discretized_nits_loss(z, params, arch=[1, 10, 1], nits_model=model)
+loss2 = discretized_nits_loss(z, params, nits_model=model)
 
 assert (loss1 - loss2).norm() < 1e-3, (loss1 - loss2).norm()
 
@@ -178,14 +180,14 @@ print("All tests passed!")
 print("Testing Conditional NITS.")
 start, end = -2., 2.
 monotonic_const = 1e-2
-d = 4
-c_arch = [d, 8, 8, 1]
-constraint_type = 'exp'
+d = 2
+c_arch = [d] + base_arch
+A_constraint = 'exp'
 final_layer_constraint = 'softmax'
 device = 'cpu'
 
 c_model = ConditionalNITS(d=d, start=start, end=end, arch=c_arch,
-                          monotonic_const=monotonic_const, constraint_type=constraint_type,
+                          monotonic_const=monotonic_const, A_constraint=A_constraint,
                           final_layer_constraint=final_layer_constraint,
                           autoregressive=False).to(device)
 
@@ -197,7 +199,7 @@ def cond_zs_params_to_cdfs(zs, params):
     for z, param in zip(zs, params):
         for d_ in range(d):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
-                                           constraint_type=constraint_type, monotonic_const=monotonic_const,
+                                           A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
                                            non_conditional_dim=d_).to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
@@ -209,14 +211,14 @@ def cond_zs_params_to_cdfs(zs, params):
 
 autograd_outs = cond_zs_params_to_cdfs(z, c_params)
 outs = c_model.cdf(z, c_params)
-assert torch.allclose(autograd_outs, outs, atol=1e-4)
+assert torch.allclose(autograd_outs, outs, atol=1e-3), (autograd_outs - outs).norm()
 
 def cond_zs_params_to_pdfs(zs, params):
     out = []
     for z, param in zip(zs, params):
         for d_ in range(d):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
-                                           constraint_type=constraint_type, monotonic_const=monotonic_const,
+                                           A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
                                            non_conditional_dim=d_).to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
@@ -237,7 +239,7 @@ def cond_zs_params_to_icdfs(ys, zs, params):
     for y, z, param in zip(ys, zs, params):
         for d_ in range(d):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
-                                           constraint_type=constraint_type, monotonic_const=monotonic_const,
+                                           A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
                                            non_conditional_dim=d_).to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
@@ -267,12 +269,12 @@ print("All tests passed!")
 print('Testing autoregressive conditional NITS.')
 start, end = -2., 2.
 monotonic_const = 1e-2
-constraint_type = 'exp'
+A_constraint = 'neg_exp'
 final_layer_constraint = 'softmax'
 device = 'cpu'
 
 c_model = ConditionalNITS(d=d, start=start, end=end, arch=c_arch,
-                          monotonic_const=monotonic_const, constraint_type=constraint_type,
+                          monotonic_const=monotonic_const, A_constraint=A_constraint,
                           final_layer_constraint=final_layer_constraint,
                           autoregressive=True).to(device)
 
@@ -289,9 +291,9 @@ def cond_zs_params_to_cdfs(zs, params):
     for z, param in zip(zs, params):
         for d_ in range(d):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
-                                           constraint_type=constraint_type, monotonic_const=monotonic_const,
+                                           A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_).to(device)
+                                           non_conditional_dim=d_, b_constraint='tanh').to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -311,9 +313,9 @@ def cond_zs_params_to_pdfs(zs, params):
     for z, param in zip(zs, params):
         for d_ in range(d):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
-                                           constraint_type=constraint_type, monotonic_const=monotonic_const,
+                                           A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_).to(device)
+                                           non_conditional_dim=d_, b_constraint='tanh').to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -335,9 +337,9 @@ def cond_zs_params_to_icdfs(ys, zs, params):
     for y, z, param in zip(ys, zs, params):
         for d_ in range(d):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
-                                           constraint_type=constraint_type, monotonic_const=monotonic_const,
+                                           A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_).to(device)
+                                           non_conditional_dim=d_, b_constraint='tanh').to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -359,3 +361,5 @@ assert torch.allclose(cond_zs_params_to_cdfs(autograd_outs, c_params), y, atol=1
 print("All tests passed!")
 
 print("Passed all unit tests!")
+
+

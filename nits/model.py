@@ -20,13 +20,15 @@ class NITSMonotonicInverse(torch.autograd.Function):
         return None, dy
 
 class NITSPrimitive(nn.Module):
-    def __init__(self, arch, start=0., end=1., constraint_type='exp',
+    def __init__(self, arch, start=0., end=1., A_constraint='exp',
                  monotonic_const=1e-3, activation='sigmoid',
-                 final_layer_constraint='exp', non_conditional_dim=0):
+                 final_layer_constraint='exp', non_conditional_dim=0,
+                 b_constraint=''):
         super(NITSPrimitive, self).__init__()
         self.arch = arch
         self.monotonic_const = monotonic_const
-        self.constraint_type = constraint_type
+        self.A_constraint = A_constraint
+        self.b_constraint = b_constraint
         self.final_layer_constraint = final_layer_constraint
         self.last_layer = len(arch) - 2
         self.activation = activation
@@ -66,19 +68,31 @@ class NITSPrimitive(nn.Module):
 
         return end
 
-    def apply_constraint(self, A, constraint_type):
-        if constraint_type == 'neg_exp':
+    def apply_A_constraint(self, A, constraint):
+        if constraint == 'neg_exp':
             A = (-A.clamp(min=-7.)).exp()
-        if constraint_type == 'exp':
+        if constraint == 'exp':
             A = A.clamp(max=7.).exp()
-        elif constraint_type == 'clamp':
+        elif constraint == 'clamp':
             A = A.clamp(min=0.)
-        elif constraint_type == 'softmax':
+        elif constraint == 'softmax':
             A = F.softmax(A, dim=-1)
-        elif constraint_type == '':
+        elif constraint == '':
             pass
 
         return A
+    
+    def apply_b_constraint(self, b, constraint):
+        if constraint == 'tanh_conditional':
+            mask = torch.ones_like(b, dtype=bool)
+            mask[:, self.non_conditional_dim] = False
+            return b[mask].tanh() + b[mask.logical_not()]
+        elif constraint == 'tanh':
+            b = b.tanh()
+        elif constraint == '':
+            pass
+        
+        return b
 
     def apply_act(self, x):
         if self.activation == 'tanh':
@@ -107,20 +121,19 @@ class NITSPrimitive(nn.Module):
             A = params[:,cur_idx:A_end].reshape(-1, out_features, in_features)
             cur_idx = A_end
 
-            constraint = self.constraint_type if i < self.last_layer else self.final_layer_constraint
-            A = self.apply_constraint(A, constraint)
+            A_constraint = self.A_constraint if i < self.last_layer else self.final_layer_constraint
+            A = self.apply_A_constraint(A, A_constraint)
             As.append(A)
             x = torch.einsum('nij,nj->ni', A, x)
 
             # get bias weights if not softmax layer
             if i < self.last_layer or self.final_layer_constraint != 'softmax':
                 b_end = A_end + out_features
-                b = params[:,A_end:b_end].reshape(-1, out_features)
+                b = params[:, A_end:b_end].reshape(-1, out_features)
+                b = self.apply_b_constraint(b, self.b_constraint)
                 bs.append(b)
                 cur_idx = b_end
-                if i < self.last_layer and self.constraint_type == 'neg_exp':
-                    x = x - (b.unsqueeze(-1) * A).mean(axis=-1)
-                elif i == self.last_layer and self.final_layer_constraint == 'neg_exp':
+                if A_constraint == 'neg_exp':
                     x = x - (b.unsqueeze(-1) * A).mean(axis=-1)
                 else:
                     x = x + b
@@ -221,10 +234,10 @@ class NITSPrimitive(nn.Module):
         return result
 
 class NITS(NITSPrimitive):
-    def __init__(self, d, arch, start=-2., end=2., constraint_type='neg_exp',
+    def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax'):
         super(NITS, self).__init__(arch, start, end,
-                                           constraint_type=constraint_type,
+                                           A_constraint=A_constraint,
                                            monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint)
         self.d = d
@@ -235,7 +248,7 @@ class NITS(NITSPrimitive):
         self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
 
         self.nits = NITSPrimitive(arch, start, end,
-                         constraint_type=constraint_type,
+                         A_constraint=A_constraint,
                          monotonic_const=monotonic_const,
                          final_layer_constraint=final_layer_constraint)
 
@@ -296,16 +309,16 @@ class NITS(NITSPrimitive):
 
         return self.nits.sample(params).reshape((-1, self.d))
 
-    def initialize_parameters(self, n, constraint_type):
+    def initialize_parameters(self, n, A_constraint):
         params = torch.rand((self.d * n, self.n_params))
 
-        def init_constant(params, in_features, constraint_type):
+        def init_constant(params, in_features, A_constraint):
             const = np.sqrt(1 / in_features)
-            if constraint_type == 'clamp':
+            if A_constraint == 'clamp':
                 params = params.abs() * const
-            elif constraint_type == 'exp':
+            elif A_constraint == 'exp':
                 params = params * np.log(const)
-            elif constraint_type == 'tanh':
+            elif A_constraint == 'tanh':
                 params = params * np.arctanh(const - 1)
 
             return params
@@ -316,7 +329,7 @@ class NITS(NITSPrimitive):
             next_idx = cur_idx + (a1 * a2)
             if i < len(self.arch) - 2 or self.final_layer_constraint != 'softmax':
                  next_idx = next_idx + a2
-            params[:,cur_idx:next_idx] = init_constant(params[:,cur_idx:next_idx], a2, constraint_type)
+            params[:,cur_idx:next_idx] = init_constant(params[:,cur_idx:next_idx], a2, A_constraint)
             cur_idx = next_idx
 
         return params.reshape((n, self.d * self.n_params))
@@ -325,11 +338,11 @@ class ConditionalNITS(NITSPrimitive):
     # TODO: for now, just implement ConditionalNITS such that it sequentially evaluates each dimension
     # this process is (probably) possible to vectorize, but since we're currently only doing 3 dimensions,
     # there's no need to speed things up, because we only gain a factor of 3 speedup
-    def __init__(self, d, arch, start=-2., end=2., constraint_type='neg_exp',
+    def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax',
                  autoregressive=True):
         super(ConditionalNITS, self).__init__(arch=arch, start=start, end=end,
-                                           constraint_type=constraint_type,
+                                           A_constraint=A_constraint,
                                            monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint)
         self.d = d
@@ -339,15 +352,17 @@ class ConditionalNITS(NITSPrimitive):
 
         self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
         self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
+        
+        self.b_constraint = 'tanh' if self.autoregressive else ''
 
         assert arch[0] == d
         self.nits_list = torch.nn.ModuleList()
         for i in range(self.d):
             model = NITSPrimitive(arch=arch, start=start, end=end,
-                         constraint_type=constraint_type,
+                         A_constraint=A_constraint,
                          monotonic_const=monotonic_const,
                          final_layer_constraint=final_layer_constraint,
-                         non_conditional_dim=i)
+                         non_conditional_dim=i, b_constraint=self.b_constraint)
             self.nits_list.append(model)
 
     def causal_mask(self, x, i):
@@ -416,7 +431,7 @@ class ConditionalNITS(NITSPrimitive):
         result = []
         for i in range(self.d):
             if self.autoregressive:
-                given_x = torch.cat(result + [torch.zeros(len(x), self.d - len(result))], axis=1)
+                given_x = torch.cat(result + [torch.zeros(len(x), self.d - len(result), device=params.device)], axis=1)
             start_idx, end_idx = i * self.n_params, (i + 1) * self.n_params
             func = lambda x, params: self.nits_list[i].icdf(x, params, given_x=given_x)
             result.append(self.apply_conditional_func(func, x, params[:,start_idx:end_idx]))
