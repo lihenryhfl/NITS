@@ -141,13 +141,13 @@ def nits_sample(params, nits_model):
     batch_size, height, width, params_per_pixel = params.shape
 
     nits_model = nits_model.to(params.device)
-
-    n_channels = int(params_per_pixel / nits_model.n_params)
-    
-    assert n_channels == nits_model.d
     
     imgs = nits_model.sample(1, params.reshape(-1, nits_model.tot_params)).clamp(min=-1., max=1.)
+#     params = params.reshape(-1, nits_model.tot_params)
+#     z = torch.rand((len(params), nits_model.d)).to(params.device)
+#     imgs = nits_model.icdf(z, params)
+#     assert torch.allclose(nits_model.cdf(imgs, params), z, atol=1e-2)
     
-    imgs = imgs.reshape(batch_size, height, width, n_channels).permute(0, 3, 1, 2)
+    imgs = imgs.reshape(batch_size, height, width, nits_model.d).permute(0, 3, 1, 2)
 
     return imgs

@@ -5,151 +5,165 @@ from nits.autograd_model import *
 device = 'cpu'
 # device = 'cuda:2'
 
-base_arch = [8, 1]
+base_arch = [4, 4, 1]
 
 n = 32
 start, end = -2., 2.
-arch = [1] + base_arch
 monotonic_const = 1e-2
 
 print("Testing NITS.")
 
-for d in [1, 2, 10]:
-    for A_constraint in ['neg_exp', 'exp']:
-        for final_layer_constraint in ['softmax', 'exp']:
+for A_constraint in ['neg_exp', 'exp']:
+    for final_layer_constraint in ['softmax', 'exp']:
 #             print("""
 #             Testing configuration:
 #                 d: {}
 #                 A_constraint: {}
 #                 final_layer_constraint: {}
 #                   """.format(d, A_constraint, final_layer_constraint))
-            ############################
-            # DEFINE MODELS            #
-            ############################
+        ############################
+        # DEFINE MODELS            #
+        ############################
+        d = 1
+        arch = [d] + base_arch
+        model = NITS(d=d, start=start, end=end, arch=arch,
+                             monotonic_const=monotonic_const, A_constraint=A_constraint,
+                             final_layer_constraint=final_layer_constraint).to(device)
+        params = torch.randn((n, d * model.n_params)).to(device)
 
-            model = NITS(d=d, start=start, end=end, arch=arch,
-                                 monotonic_const=monotonic_const, A_constraint=A_constraint,
-                                 final_layer_constraint=final_layer_constraint).to(device)
-            params = torch.randn((n, d * model.n_params)).to(device)
+        ############################
+        # SANITY CHECKS            #
+        ############################
 
-            ############################
-            # SANITY CHECKS            #
-            ############################
+        # check that the function integrates to 1
+        assert torch.allclose(torch.ones((n, d)).to(device),
+                              model.cdf(model.end, params) - model.cdf(model.start, params), atol=1e-5)
 
-            # check that the function integrates to 1
-            assert torch.allclose(torch.ones((n, d)).to(device),
-                                  model.cdf(model.end, params) - model.cdf(model.start, params), atol=1e-5)
+        # check that the pdf is all positive
+        z = torch.linspace(start, end, steps=n, device=device)[:,None].tile((1, d))
+        assert (model.pdf(z, params) >= 0).all()
 
-            # check that the pdf is all positive
-            z = torch.linspace(start, end, steps=n, device=device)[:,None].tile((1, d))
-            assert (model.pdf(z, params) >= 0).all()
+        # check that the cdf is the inverted
+        cdf = model.cdf(z, params[0:1])
+        icdf = model.icdf(cdf, params[0:1])
+        assert (z - icdf <= 1e-3).all()
 
-            # check that the cdf is the inverted
-            cdf = model.cdf(z, params[0:1])
-            icdf = model.icdf(cdf, params[0:1])
-            assert (z - icdf <= 1e-3).all()
+        ############################
+        # COMPARE TO AUTOGRAD NITS #
+        ############################
+        autograd_model = ModelInverse(arch=arch, start=start, end=end, store_weights=False,
+                                      A_constraint=A_constraint, monotonic_const=monotonic_const,
+                                      final_layer_constraint=final_layer_constraint).to(device)
 
-            ############################
-            # COMPARE TO AUTOGRAD NITS #
-            ############################
-            autograd_model = ModelInverse(arch=arch, start=start, end=end, store_weights=False,
-                                          A_constraint=A_constraint, monotonic_const=monotonic_const,
-                                          final_layer_constraint=final_layer_constraint).to(device)
+        def zs_params_to_forwards(zs, params):
+            out = []
+            for z, param in zip(zs, params):
+                for d_ in range(d):
+                    start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
+                    autograd_model.set_params(param[start_idx:end_idx])
+                    out.append(autograd_model.apply_layers(z[d_:d_+1][None,:]))
 
-            def zs_params_to_forwards(zs, params):
-                out = []
-                for z, param in zip(zs, params):
-                    for d_ in range(d):
-                        start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
-                        autograd_model.set_params(param[start_idx:end_idx])
-                        out.append(autograd_model.apply_layers(z[d_:d_+1][None,:]))
+            out = torch.cat(out, axis=0).reshape(-1, d)
+            return out
 
-                out = torch.cat(out, axis=0).reshape(-1, d)
-                return out
+        autograd_outs = zs_params_to_forwards(z, params)
+        outs = model.forward_(z, params)
+        assert torch.allclose(autograd_outs, outs, atol=1e-4)
 
-            autograd_outs = zs_params_to_forwards(z, params)
-            outs = model.forward_(z, params)
-            assert torch.allclose(autograd_outs, outs, atol=1e-4)
+        def zs_params_to_cdfs(zs, params):
+            out = []
+            for z, param in zip(zs, params):
+                for d_ in range(d):
+                    start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
+                    autograd_model.set_params(param[start_idx:end_idx])
+                    out.append(autograd_model.cdf(z[d_:d_+1][None,:]))
 
-            def zs_params_to_cdfs(zs, params):
-                out = []
-                for z, param in zip(zs, params):
-                    for d_ in range(d):
-                        start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
-                        autograd_model.set_params(param[start_idx:end_idx])
-                        out.append(autograd_model.cdf(z[d_:d_+1][None,:]))
+            out = torch.cat(out, axis=0).reshape(-1, d)
+            return out
 
-                out = torch.cat(out, axis=0).reshape(-1, d)
-                return out
+        autograd_outs = zs_params_to_cdfs(z, params)
+        outs = model.cdf(z, params)
+        assert torch.allclose(autograd_outs, outs, atol=1e-4)
 
-            autograd_outs = zs_params_to_cdfs(z, params)
-            outs = model.cdf(z, params)
-            assert torch.allclose(autograd_outs, outs, atol=1e-4)
+        def zs_params_to_backwards(zs, params):
+            out = []
+            for z, param in zip(zs, params):
+                for d_ in range(d):
+                    start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
+                    autograd_model.set_params(param[start_idx:end_idx])
+                    out.append(autograd_model.f_(z[d_:d_+1][None,:]))
 
-            def zs_params_to_pdfs(zs, params):
-                out = []
-                for z, param in zip(zs, params):
-                    for d_ in range(d):
-                        start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
-                        autograd_model.set_params(param[start_idx:end_idx])
-                        out.append(autograd_model.pdf(z[d_:d_+1][None,:]))
+            out = torch.cat(out, axis=0).reshape(-1, d)
+            return out
 
-                out = torch.cat(out, axis=0).reshape(-1, d)
-                return out
+        autograd_outs = zs_params_to_backwards(z, params)
+        outs = model.backward_(z, params)
+        assert torch.allclose(autograd_outs, outs, atol=1e-4)
 
-            autograd_outs = zs_params_to_pdfs(z, params)
-            outs = model.pdf(z, params)
-            assert torch.allclose(autograd_outs, outs, atol=1e-4)
+        def zs_params_to_pdfs(zs, params):
+            out = []
+            for z, param in zip(zs, params):
+                for d_ in range(d):
+                    start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
+                    autograd_model.set_params(param[start_idx:end_idx])
+                    out.append(autograd_model.pdf(z[d_:d_+1][None,:]))
 
-            def zs_params_to_icdfs(zs, params):
-                out = []
-                for z, param in zip(zs, params):
-                    for d_ in range(d):
-                        start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
-                        autograd_model.set_params(param[start_idx:end_idx])
-                        out.append(autograd_model.F_inv(z[d_:d_+1][None,:]))
+            out = torch.cat(out, axis=0).reshape(-1, d)
+            return out
 
-                out = torch.cat(out, axis=0).reshape(-1, d)
-                return out
+        autograd_outs = zs_params_to_pdfs(z, params)
+        outs = model.pdf(z, params)
+        assert torch.allclose(autograd_outs, outs, atol=1e-4)
 
-            y = torch.rand((n, d)).to(device)
-            autograd_outs = zs_params_to_icdfs(y, params)
-            outs = model.icdf(y, params)
-            assert torch.allclose(autograd_outs, outs, atol=1e-1)
+        def zs_params_to_icdfs(zs, params):
+            out = []
+            for z, param in zip(zs, params):
+                for d_ in range(d):
+                    start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
+                    autograd_model.set_params(param[start_idx:end_idx])
+                    out.append(autograd_model.F_inv(z[d_:d_+1][None,:]))
 
-            # try with single parameter, many zs
+            out = torch.cat(out, axis=0).reshape(-1, d)
+            return out
 
-            def zs_params_to_pdfs(zs, param):
-                out = []
-                for z in zs:
-                    for d_ in range(d):
-                        start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
-                        autograd_model.set_params(param[start_idx:end_idx])
-                        out.append(autograd_model.pdf(z[d_:d_+1][None,:]))
+        y = torch.rand((n, d)).to(device)
+        autograd_outs = zs_params_to_icdfs(y, params)
+        outs = model.icdf(y, params)
+        assert torch.allclose(autograd_outs, outs, atol=1e-1)
 
-                out = torch.cat(out, axis=0).reshape(-1, d)
-                return out
+        # try with single parameter, many zs
 
-            autograd_outs = zs_params_to_pdfs(z, params[0])
-            outs = model.pdf(z, params[0:1])
-            assert torch.allclose(autograd_outs, outs, atol=1e-4)
+        def zs_params_to_pdfs(zs, param):
+            out = []
+            for z in zs:
+                for d_ in range(d):
+                    start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
+                    autograd_model.set_params(param[start_idx:end_idx])
+                    out.append(autograd_model.pdf(z[d_:d_+1][None,:]))
 
-            # try with single z, many parameters
+            out = torch.cat(out, axis=0).reshape(-1, d)
+            return out
 
-            def zs_params_to_pdfs(z, params):
-                out = []
-                for param in params:
-                    for d_ in range(d):
-                        start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
-                        autograd_model.set_params(param[start_idx:end_idx])
-                        out.append(autograd_model.pdf(z[d_:d_+1][None,:]))
+        autograd_outs = zs_params_to_pdfs(z, params[0])
+        outs = model.pdf(z, params[0:1])
+        assert torch.allclose(autograd_outs, outs, atol=1e-4)
 
-                out = torch.cat(out, axis=0).reshape(-1, d)
-                return out
+        # try with single z, many parameters
 
-            autograd_outs = zs_params_to_pdfs(z[0], params)
-            outs = model.pdf(z[0:1], params)
-            assert torch.allclose(autograd_outs, outs, atol=1e-4)
+        def zs_params_to_pdfs(z, params):
+            out = []
+            for param in params:
+                for d_ in range(d):
+                    start_idx, end_idx = d_ * autograd_model.n_params, (d_ + 1) * autograd_model.n_params
+                    autograd_model.set_params(param[start_idx:end_idx])
+                    out.append(autograd_model.pdf(z[d_:d_+1][None,:]))
+
+            out = torch.cat(out, axis=0).reshape(-1, d)
+            return out
+
+        autograd_outs = zs_params_to_pdfs(z[0], params)
+        outs = model.pdf(z[0:1], params)
+        assert torch.allclose(autograd_outs, outs, atol=1e-4)
 
 from nits.discretized_mol import *
 print("Testing arch = [1, 10, 1], 'neg_exp' A_constraint, 'softmax' final_layer_constraint " \
@@ -293,7 +307,7 @@ def cond_zs_params_to_cdfs(zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_, b_constraint='tanh_conditional').to(device)
+                                           non_conditional_dim=d_, b_constraint='').to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -315,7 +329,7 @@ def cond_zs_params_to_pdfs(zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_, b_constraint='tanh_conditional').to(device)
+                                           non_conditional_dim=d_, b_constraint='').to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -339,7 +353,7 @@ def cond_zs_params_to_icdfs(ys, zs, params):
             c_autograd_model = ModelInverse(arch=c_arch, start=start, end=end, store_weights=False,
                                            A_constraint=A_constraint, monotonic_const=monotonic_const,
                                            final_layer_constraint=final_layer_constraint,
-                                           non_conditional_dim=d_, b_constraint='tanh_conditional').to(device)
+                                           non_conditional_dim=d_, b_constraint='').to(device)
             start_idx, end_idx = d_ * c_autograd_model.n_params, (d_ + 1) * c_autograd_model.n_params
             c_autograd_model.set_params(param[start_idx:end_idx])
 
@@ -361,3 +375,4 @@ assert torch.allclose(cond_zs_params_to_cdfs(autograd_outs, c_params), y, atol=1
 print("All tests passed!")
 
 print("Passed all unit tests!")
+

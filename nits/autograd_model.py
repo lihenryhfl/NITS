@@ -87,7 +87,7 @@ class ModelInverse(nn.Module):
     def __init__(self, arch, start=0., end=1., store_weights=True,
                  A_constraint='exp', monotonic_const=1e-3,
                  final_layer_constraint='exp', non_conditional_dim=0,
-                 b_constraint=''):
+                 b_constraint='', add_residual_connections=False):
         super(ModelInverse, self).__init__()
         self.d = arch[0]
         self.monotonic_const = monotonic_const
@@ -96,6 +96,7 @@ class ModelInverse(nn.Module):
         self.b_constraint = b_constraint
         self.final_layer_constraint = final_layer_constraint
         self.last_layer = len(arch) - 2
+        self.add_residual_connections = add_residual_connections
         
         # set start and end tensors
         assert non_conditional_dim < self.d
@@ -124,7 +125,7 @@ class ModelInverse(nn.Module):
             end[:, self.non_conditional_dim] = self.end_val
 
         return end
-
+                
     def build_layers(self, arch):
         self.n_params = 0
         layers = nn.ModuleList()
@@ -133,18 +134,24 @@ class ModelInverse(nn.Module):
             # add nonlinearities
             self.n_params += (a1 * a2)
             if i < self.last_layer:
-                layers.append(PositiveLinear(a1, a2, store_weights=self.store_weights,
+                sequential_modules = [
+                    PositiveLinear(a1, a2, store_weights=self.store_weights,
                                              A_constraint=self.A_constraint, 
                                              b_constraint=self.b_constraint,
-                                             non_conditional_dim=self.non_conditional_dim))
-                layers.append(nn.Sigmoid())
+                                             non_conditional_dim=self.non_conditional_dim),
+                    nn.Sigmoid()
+                ]
                 self.n_params += a2
             else:
-                layers.append(PositiveLinear(a1, a2, store_weights=self.store_weights,
-                                         A_constraint=self.final_layer_constraint))
+                sequential_modules = [
+                    PositiveLinear(a1, a2, store_weights=self.store_weights,
+                                         A_constraint=self.final_layer_constraint)
+                ]
                 if self.final_layer_constraint != 'softmax':
-                    layers.append(nn.Sigmoid())
+                    sequential_modules.append(nn.Sigmoid())
                     self.n_params += a2
+                    
+            layers.append(nn.Sequential(*sequential_modules))
 
         return layers
 
@@ -157,24 +164,28 @@ class ModelInverse(nn.Module):
         cur_idx = 0
         i = 0
         for layer in self.layers:
-            if isinstance(layer, PositiveLinear):
-                weight_shape = (layer.out_features, layer.in_features)
-                n_params = np.prod(weight_shape)
-                layer.pre_weight = param_tensor[cur_idx:cur_idx+n_params].reshape(weight_shape)
-                cur_idx += n_params
+            assert isinstance(layer[0], PositiveLinear)
+            layer = layer[0]
+            weight_shape = (layer.out_features, layer.in_features)
+            n_params = np.prod(weight_shape)
+            layer.pre_weight = param_tensor[cur_idx:cur_idx+n_params].reshape(weight_shape)
+            cur_idx += n_params
 
-                if i < self.last_layer or self.final_layer_constraint != 'softmax':
-                    layer.bias = param_tensor[cur_idx:cur_idx+layer.out_features]
-                    cur_idx += layer.out_features
-                else:
-                    layer.bias = torch.zeros(layer.out_features).to(param_tensor.device)
+            if i < self.last_layer or self.final_layer_constraint != 'softmax':
+                layer.bias = param_tensor[cur_idx:cur_idx+layer.out_features]
+                cur_idx += layer.out_features
+            else:
+                layer.bias = torch.zeros(layer.out_features).to(param_tensor.device)
 
-                i += 1
+            i += 1
 
     def apply_layers(self, x):
         y = x
         for l in self.layers:
-            y = l(y)
+            if self.add_residual_connections and l[0].pre_weight.shape[0] == l[0].pre_weight.shape[1]:
+                y = l(y) + y
+            else:
+                y = l(y)
 
         return y + self.monotonic_const * x[:,self.non_conditional_dim].unsqueeze(-1)
 

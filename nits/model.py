@@ -23,7 +23,7 @@ class NITSPrimitive(nn.Module):
     def __init__(self, arch, start=0., end=1., A_constraint='exp',
                  monotonic_const=1e-3, activation='sigmoid',
                  final_layer_constraint='exp', non_conditional_dim=0,
-                 b_constraint=''):
+                 b_constraint='', add_residual_connections=False):
         super(NITSPrimitive, self).__init__()
         self.arch = arch
         self.monotonic_const = monotonic_const
@@ -32,6 +32,7 @@ class NITSPrimitive(nn.Module):
         self.final_layer_constraint = final_layer_constraint
         self.last_layer = len(arch) - 2
         self.activation = activation
+        self.add_residual_connections = add_residual_connections
 
         # count parameters
         self.n_params = 0
@@ -104,13 +105,14 @@ class NITSPrimitive(nn.Module):
 
     def forward_(self, x, params, return_intermediaries=False):
         # the monotonic constant is only applied w.r.t. the first input dimension
-        monotonic_x = x[:,self.non_conditional_dim].unsqueeze(-1)
+        prev_x = monotonic_x = x[:,self.non_conditional_dim].unsqueeze(-1)
 
         # store pre-activations and weight matrices
         pre_activations = []
         nonlinearities = []
         As = []
         bs = []
+        residuals = []
 
         cur_idx = 0
 
@@ -138,16 +140,29 @@ class NITSPrimitive(nn.Module):
                 else:
                     x = x + b
                 pre_activations.append(x)
-                x = self.apply_act(x)
                 nonlinearities.append(self.activation)
+                
+                # apply activation
+                x = self.apply_act(x)
+                
+                # add residual connection if applicable
+                if i > 0 and self.add_residual_connections and x.shape[1] == pre_activations[-2].shape[1]:
+                    assert prev_x.shape == x.shape
+                    x = x + prev_x
+                    residuals.append(True)
+                else:
+                    residuals.append(False)
             else:
                 pre_activations.append(x)
                 nonlinearities.append('linear')
+                residuals.append(False)
+                
+            prev_x = x
 
         x = x + self.monotonic_const * monotonic_x
 
         if return_intermediaries:
-            return x, pre_activations, As, bs, nonlinearities
+            return x, pre_activations, As, bs, nonlinearities, residuals
         else:
             return x
 
@@ -157,7 +172,7 @@ class NITSPrimitive(nn.Module):
         end = self.forward_(self.end_(x), params)
 
         # compute pre-scaled cdf, then scale
-        y, pre_activations, As, bs, nonlinearities = self.forward_(x, params, return_intermediaries=True)
+        y, pre_activations, As, bs, nonlinearities, residuals = self.forward_(x, params, return_intermediaries=True)
         scale = 1 / (end - start)
         y_scaled = (y - start) * scale
 
@@ -165,13 +180,15 @@ class NITSPrimitive(nn.Module):
         pre_activations.append(y_scaled)
         As.append(scale.reshape(-1, 1, 1))
         nonlinearities.append('linear')
+        residuals.append(False)
 
         if return_intermediaries:
-            return y_scaled, pre_activations, As, bs, nonlinearities
+            return y_scaled, pre_activations, As, bs, nonlinearities, residuals
         else:
             return y_scaled
 
-    def fc_gradient(self, grad, pre_activation, A, activation):
+    def fc_gradient(self, grad, pre_activation, A, activation, residual):
+        orig_grad = grad
         if activation == 'linear':
             pass
         elif activation == 'tanh':
@@ -179,32 +196,38 @@ class NITSPrimitive(nn.Module):
         elif activation == 'sigmoid':
             sig_act = pre_activation.sigmoid()
             grad = grad * sig_act * (1 - sig_act)
+            
+        result = torch.einsum('ni,nij->nj', grad, A)
+        
+        if residual:
+            result = result + orig_grad
 
-        return torch.einsum('ni,nij->nj', grad, A)
+        return result
 
-    def backward_primitive_(self, y, pre_activations, As, bs, nonlinearities):
+    def backward_primitive_(self, y, pre_activations, As, bs, nonlinearities, residuals):
         pre_activations.reverse()
         As.reverse()
         nonlinearities.reverse()
+        residuals.reverse()
         grad = torch.ones_like(y, device=y.device)
 
-        for i, (A, pre_activation, nonlinearity) in enumerate(zip(As, pre_activations, nonlinearities)):
-            grad = self.fc_gradient(grad, pre_activation, A, activation=nonlinearity)
+        for i, (A, pre_activation, nonlinearity, residual) in enumerate(zip(As, pre_activations, nonlinearities, residuals)):
+            grad = self.fc_gradient(grad, pre_activation, A, activation=nonlinearity, residual=residual)
 
         # we only want gradients w.r.t. the first input dimension
         return grad[:,self.non_conditional_dim].unsqueeze(-1)
 
     def backward_(self, x, params):
-        y, pre_activations, As, bs, nonlinearities = self.forward_(x, params, return_intermediaries=True)
+        y, pre_activations, As, bs, nonlinearities, residuals = self.forward_(x, params, return_intermediaries=True)
 
-        grad = self.backward_primitive_(y, pre_activations, As, bs, nonlinearities)
+        grad = self.backward_primitive_(y, pre_activations, As, bs, nonlinearities, residuals)
 
         return grad + self.monotonic_const
 
     def pdf(self, x, params):
-        y, pre_activations, As, bs, nonlinearities = self.cdf(x, params, return_intermediaries=True)
+        y, pre_activations, As, bs, nonlinearities, residuals = self.cdf(x, params, return_intermediaries=True)
 
-        grad = self.backward_primitive_(y, pre_activations, As, bs, nonlinearities)
+        grad = self.backward_primitive_(y, pre_activations, As, bs, nonlinearities, residuals)
 
         return grad + self.monotonic_const * As[0].reshape(-1, 1)
 
@@ -353,7 +376,8 @@ class ConditionalNITS(NITSPrimitive):
         self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
         self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
         
-        self.b_constraint = 'tanh_conditional' if self.autoregressive else ''
+#         self.b_constraint = 'tanh_conditional' if self.autoregressive else ''
+        self.b_constraint = ''
 
         assert arch[0] == d
         self.nits_list = torch.nn.ModuleList()
