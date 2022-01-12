@@ -374,5 +374,58 @@ assert torch.allclose(cond_zs_params_to_cdfs(autograd_outs, c_params), y, atol=1
 
 print("All tests passed!")
 
+print('Testing pixelrnn-like autoregressive conditional NITS.')
+
+start, end = -2., 2.
+monotonic_const = 0.
+A_constraint = 'neg_exp'
+final_layer_constraint = 'softmax'
+batch_size = 1024
+
+c_model = ConditionalNITS(d=3, start=start, end=end, arch=[1, 10, 1],
+                          monotonic_const=monotonic_const, A_constraint=A_constraint,
+                          final_layer_constraint=final_layer_constraint,
+                          autoregressive=True, pixelrnn=True, normalize_inverse=False).to(device)
+
+c_params = torch.randn(batch_size, c_model.tot_params, 2, 2, device=device)
+z = torch.rand(batch_size, 3, 2, 2, device=device) * 2 - 1
+
+# make sure outputs align with pixelrnn
+loss1 = discretized_mix_logistic_loss(z, c_params, bad_loss=True)
+loss2 = discretized_nits_loss(z, c_params, c_model)
+
+dist_per_dim = (loss1 - loss2).abs() / np.prod(z.shape)
+
+assert dist_per_dim < 1e-6
+
+# make sure that cdf and icdf return the correct result
+c_params = torch.randn(batch_size, c_model.tot_params, device=device)
+z = torch.rand(batch_size, 3, device=device) * 2 - 1
+cdf_ = c_model.forward_(z, c_params)
+icdf_ = c_model.icdf(cdf_, c_params)
+
+assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
+assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
+assert (z - icdf_).abs().max() < 1e-2
+
+
+# test icdf, when normalize_inverse == True (i.e. not EXACTLY pixelrnn anymore)
+c_model = ConditionalNITS(d=3, start=start, end=end, arch=[1, 10, 1],
+                          monotonic_const=monotonic_const, A_constraint=A_constraint,
+                          final_layer_constraint=final_layer_constraint,
+                          autoregressive=True, pixelrnn=True, normalize_inverse=True).to(device)
+
+# make sure that cdf and icdf return the correct result
+c_params = torch.randn(batch_size, c_model.tot_params, device=device)
+z = torch.rand(batch_size, 3, device=device) * 2 - 1
+cdf_ = c_model.cdf(z, c_params)
+icdf_ = c_model.icdf(cdf_, c_params)
+
+assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
+assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
+assert (z - icdf_).abs().max() < 1e-2
+
+print("All tests passed!")
+
 print("Passed all unit tests!")
 
