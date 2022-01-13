@@ -291,9 +291,17 @@ def discretized_nits_loss(x, l, nits_model):
     x_plus = (x * 127.5 + .5).round() / 127.5
     x_min = (x * 127.5 - .5).round() / 127.5
     
-    
-    pre_cdf = nits_model.cdf if nits_model.normalize_inverse else nits_model.forward_
-    pre_pdf = nits_model.pdf if nits_model.normalize_inverse else nits_model.backward_
+    if nits_model.normalize_inverse:
+#         print('normalizing in loss!')
+        pre_cdf = nits_model.cdf
+        pre_pdf = nits_model.pdf
+    else:
+#         print('NOT normalizing in loss!')
+        pre_cdf = nits_model.forward_
+        pre_pdf = nits_model.backward_
+        
+#     pre_cdf = nits_model.cdf if nits_model.normalize_inverse else nits_model.forward_
+#     pre_pdf = nits_model.pdf if nits_model.normalize_inverse else nits_model.backward_
     
     if nits_model.pixelrnn:
         cdf = lambda x_, params: pre_cdf(x_, params, x_unrounded=x)
@@ -326,11 +334,6 @@ def nits_sample(params, nits_model):
     nits_model = nits_model.to(params.device)
     
     imgs = nits_model.sample(1, params.reshape(-1, nits_model.tot_params)).clamp(min=-1., max=1.)
-#     params = params.reshape(-1, nits_model.tot_params)
-#     z = torch.rand((len(params), nits_model.d)).to(params.device)
-#     imgs = nits_model.icdf(z, params)
-#     assert torch.allclose(nits_model.cdf(imgs, params), z, atol=1e-2)
-    
     imgs = imgs.reshape(batch_size, height, width, nits_model.d).permute(0, 3, 1, 2)
 
     return imgs
