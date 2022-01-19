@@ -272,7 +272,7 @@ def sample_from_discretized_mix_logistic(l, nr_mix):
 
 #     return -log_probs.sum()
 
-def discretized_nits_loss(x, l, nits_model):
+def discretized_nits_loss(x, l, nits_model, eps=1e-7):
     """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
     # Pytorch ordering
     x = x.permute(0, 2, 3, 1)
@@ -310,13 +310,13 @@ def discretized_nits_loss(x, l, nits_model):
         cdf = pre_cdf
         pdf = pre_pdf
     
-    cdf_plus = cdf(x_plus, params).clamp(max=1-1e-7, min=1e-7)
-    cdf_min = cdf(x_min, params).clamp(max=1-1e-7, min=1e-7)
+    cdf_plus = cdf(x_plus, params).clamp(max=1-eps, min=eps)
+    cdf_min = cdf(x_min, params).clamp(max=1-eps, min=eps)
     
     cdf_delta = cdf_plus - cdf_min
     log_cdf_plus = (cdf_plus).log()
     log_one_minus_cdf_min = (1 - cdf_min).log()
-    log_pdf_mid = pdf(x, params).log()
+    log_pdf_mid = (pdf(x, params) + eps).log()
 
     inner_inner_cond = (cdf_delta > 1e-5).float()
     inner_inner_out  = inner_inner_cond * torch.clamp(cdf_delta, min=1e-12).log() + (1. - inner_inner_cond) * (log_pdf_mid - np.log(127.5))
