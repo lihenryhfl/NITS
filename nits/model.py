@@ -24,7 +24,7 @@ class NITSPrimitive(nn.Module):
                  monotonic_const=1e-3, activation='sigmoid',
                  final_layer_constraint='exp', non_conditional_dim=0,
                  add_residual_connections=False, pixelrnn=False,
-                 normalize_inverse=True):
+                 normalize_inverse=True, softmax_temperature=True):
         super(NITSPrimitive, self).__init__()
         self.arch = arch
         self.monotonic_const = monotonic_const
@@ -35,6 +35,7 @@ class NITSPrimitive(nn.Module):
         self.add_residual_connections = add_residual_connections
         self.pixelrnn = pixelrnn
         self.normalize_inverse = normalize_inverse
+        self.softmax_temperature = softmax_temperature
 
         # count parameters
         self.n_params = 0
@@ -47,6 +48,9 @@ class NITSPrimitive(nn.Module):
             self.n_params += (a1 * a2)
             if i < self.last_layer or final_layer_constraint != 'softmax':
                 self.n_params += a2
+                
+        if self.softmax_temperature:
+            self.n_params += 1 # softmax temperature
 
         # set start and end tensors
         self.d = arch[0]
@@ -75,7 +79,7 @@ class NITSPrimitive(nn.Module):
 
         return end
 
-    def apply_A_constraint(self, A, constraint):
+    def apply_A_constraint(self, A, constraint, params):
         if constraint == 'neg_exp':
             A = (-A.clamp(min=-7.)).exp()
         if constraint == 'exp':
@@ -83,7 +87,11 @@ class NITSPrimitive(nn.Module):
         elif constraint == 'clamp':
             A = A.clamp(min=0.)
         elif constraint == 'softmax':
-            A = F.softmax(A, dim=-1)
+            if self.softmax_temperature:
+                T = params[:, -1].reshape(-1, 1, 1)
+            else:
+                T = 1
+            A = F.softmax(A / T, dim=-1)
         elif constraint == '':
             pass
 
@@ -129,7 +137,7 @@ class NITSPrimitive(nn.Module):
             cur_idx = A_end
 
             A_constraint = self.A_constraint if i < self.last_layer else self.final_layer_constraint
-            A = self.apply_A_constraint(A, A_constraint)
+            A = self.apply_A_constraint(A, A_constraint, params)
             As.append(A)
             x = torch.einsum('nij,nj->ni', A, x)
 
@@ -278,7 +286,8 @@ class NITSPrimitive(nn.Module):
 class NITS(NITSPrimitive):
     def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax',
-                 add_residual_connections=False, normalize_inverse=True):
+                 add_residual_connections=False, normalize_inverse=True,
+                 softmax_temperature=True):
         super(NITS, self).__init__(arch, start, end,
                                            A_constraint=A_constraint,
                                            monotonic_const=monotonic_const,
@@ -288,6 +297,7 @@ class NITS(NITSPrimitive):
         self.final_layer_constraint = final_layer_constraint
         self.add_residual_connections=add_residual_connections
         self.normalize_inverse = normalize_inverse
+        self.softmax_temperature = softmax_temperature
 
         self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
         self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
@@ -297,7 +307,8 @@ class NITS(NITSPrimitive):
                                   monotonic_const=monotonic_const,
                                   final_layer_constraint=final_layer_constraint,
                                   add_residual_connections=add_residual_connections,
-                                  normalize_inverse=normalize_inverse)
+                                  normalize_inverse=normalize_inverse,
+                                  softmax_temperature=softmax_temperature)
 
     def multidim_reshape(self, x, params):
         n = max(len(x), len(params))
@@ -388,7 +399,7 @@ class ConditionalNITS(nn.Module):
     def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax',
                  autoregressive=True, pixelrnn=False, normalize_inverse=True,
-                 add_residual_connections=False):
+                 add_residual_connections=False, softmax_temperature=True):
         super(ConditionalNITS, self).__init__()
         
         self.d = d
@@ -401,6 +412,7 @@ class ConditionalNITS(nn.Module):
         
         self.pixelrnn = pixelrnn
         self.normalize_inverse = normalize_inverse
+        self.softmax_temperature = softmax_temperature
 
         assert arch[0] == d or pixelrnn
         self.nits_list = torch.nn.ModuleList()
@@ -411,7 +423,8 @@ class ConditionalNITS(nn.Module):
                                   final_layer_constraint=final_layer_constraint,
                                   non_conditional_dim=i, pixelrnn=pixelrnn,
                                   normalize_inverse=normalize_inverse,
-                                  add_residual_connections=add_residual_connections)
+                                  add_residual_connections=add_residual_connections,
+                                  softmax_temperature=softmax_temperature)
             self.nits_list.append(model)
             
         if pixelrnn:

@@ -46,7 +46,7 @@ class PositiveLinear(nn.Module):
         elif self.A_constraint == 'exp':
             weight = self.pre_weight.exp()
         elif self.A_constraint == 'softmax':
-            weight = F.softmax(self.pre_weight, dim=-1)
+            weight = F.softmax(self.pre_weight / self.T, dim=-1)
         elif self.A_constraint == 'clamp':
             weight = self.pre_weight.clamp(min=0.)
         elif self.A_constraint == '':
@@ -87,7 +87,8 @@ class ModelInverse(nn.Module):
     def __init__(self, arch, start=0., end=1., store_weights=True,
                  A_constraint='exp', monotonic_const=1e-3,
                  final_layer_constraint='exp', non_conditional_dim=0,
-                 b_constraint='', add_residual_connections=False):
+                 b_constraint='', add_residual_connections=False,
+                 softmax_temperature=True):
         super(ModelInverse, self).__init__()
         self.d = arch[0]
         self.monotonic_const = monotonic_const
@@ -97,6 +98,7 @@ class ModelInverse(nn.Module):
         self.final_layer_constraint = final_layer_constraint
         self.last_layer = len(arch) - 2
         self.add_residual_connections = add_residual_connections
+        self.softmax_temperature = softmax_temperature
         
         # set start and end tensors
         assert non_conditional_dim < self.d
@@ -152,6 +154,9 @@ class ModelInverse(nn.Module):
                     self.n_params += a2
                     
             layers.append(nn.Sequential(*sequential_modules))
+            
+        if self.softmax_temperature:
+            self.n_params += 1 # softmax temperature
 
         return layers
 
@@ -176,8 +181,13 @@ class ModelInverse(nn.Module):
                 cur_idx += layer.out_features
             else:
                 layer.bias = torch.zeros(layer.out_features).to(param_tensor.device)
+                if self.softmax_temperature:
+                    assert cur_idx == (len(param_tensor) - 1)
+                    layer.T = param_tensor[-1]
+                else:
+                    layer.T = 1
 
-            i += 1
+            i += 1        
 
     def apply_layers(self, x):
         y = x

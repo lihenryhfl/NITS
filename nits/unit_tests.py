@@ -171,7 +171,7 @@ print("Testing arch = [1, 10, 1], 'neg_exp' A_constraint, 'softmax' final_layer_
 
 model = NITS(d=1, start=-1e5, end=1e5, arch=[1, 10, 1],
                      monotonic_const=0., A_constraint='neg_exp',
-                     final_layer_constraint='softmax').to(device)
+                     final_layer_constraint='softmax', softmax_temperature=False).to(device)
 params = torch.randn((n, model.n_params, 1, 1))
 z = torch.randn((n, 1, 1, 1))
 
@@ -182,7 +182,7 @@ assert (loss1 - loss2).norm() < 1e-2, (loss1 - loss2).norm()
 
 model = NITS(d=1, start=-1e7, end=1e7, arch=[1, 10, 1],
                      monotonic_const=0., A_constraint='neg_exp',
-                     final_layer_constraint='softmax').to(device)
+                     final_layer_constraint='softmax', softmax_temperature=False).to(device)
 
 loss1 = discretized_mix_logistic_loss_1d(z, params)
 loss2 = discretized_nits_loss(z, params, nits_model=model)
@@ -385,7 +385,8 @@ batch_size = 1024
 c_model = ConditionalNITS(d=3, start=start, end=end, arch=[1, 10, 1],
                           monotonic_const=monotonic_const, A_constraint=A_constraint,
                           final_layer_constraint=final_layer_constraint,
-                          autoregressive=True, pixelrnn=True, normalize_inverse=False).to(device)
+                          autoregressive=True, pixelrnn=True, normalize_inverse=False,
+                          softmax_temperature=False).to(device)
 
 c_params = torch.randn(batch_size, c_model.tot_params, 2, 2, device=device)
 z = torch.rand(batch_size, 3, 2, 2, device=device) * 2 - 1
