@@ -121,7 +121,6 @@ class NITSPrimitive(nn.Module):
             cur_idx = 3 * self.arch[1]
             linear_weights = params[:,:cur_idx].reshape(-1, 3, self.arch[1]).tanh()
             x_masked = x_unrounded.clone() if x_unrounded is not None else x.clone()
-#             x_masked[:, self.non_conditional_dim:] = 0.
             dim = self.non_conditional_dim
             x_masked = torch.cat([x_masked[:,:dim], torch.zeros_like(x_masked)[:,dim:]], axis=1)
             b_linear = torch.einsum('ni,nij->nj', x_masked, linear_weights)

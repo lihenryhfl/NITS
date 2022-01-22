@@ -62,14 +62,16 @@ parser.add_argument('-s', '--seed', type=int, default=1,
                     help='Random seed to use')
 
 # nits model
-parser.add_argument('-a', '--nits_arch', type=list_str_to_list, default='[8, 8, 1]',
+parser.add_argument('-a', '--nits_arch', type=list_str_to_list, default='[8,8,1]',
                     help='Architecture of NITS model')
 parser.add_argument('-nb', '--nits_bound', type=float, default=5.,
                     help='Upper and lower bound of NITS model')
 parser.add_argument('-c', '--constraint', type=str, default='neg_exp',
-                    help='Upper and lower bound of NITS model')
+                    help='Constraint type of NITS')
 parser.add_argument('-fc', '--final_constraint', type=str, default='softmax',
-                    help='Upper and lower bound of NITS model')
+                    help='Final constraint of NITS')
+parser.add_argument('-st', '--softmax_temp', type=bool, default=True,
+                    help='Use of softmax temperature')
 
 
 args = parser.parse_args()
@@ -82,11 +84,6 @@ print('device:', device)
 # reproducibility
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
-
-model_name = 'lr_{:.5f}_nr_resnet{}_nr_filters{}_nits_arch{}_constraint{}_final_constraint{}'.format(
-    args.lr, args.nr_resnet, args.nr_filters, args.nits_arch, args.constraint, args.final_constraint)
-if os.path.exists(os.path.join('runs_test', model_name)):
-    shutil.rmtree(os.path.join('runs_test', model_name))
 
 sample_batch_size = 25
 obs = (1, 28, 28) if 'mnist' in args.dataset else (3, 32, 32)
@@ -117,12 +114,16 @@ else :
 if 'mnist' in args.dataset:
     arch = [1] + args.nits_arch
     nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-5,
-                      A_constraint=args.constraint, arch=arch, final_layer_constraint=args.final_constraint).to(device)
+                      A_constraint=args.constraint, arch=arch, 
+                      final_layer_constraint=args.final_constraint,
+                      softmax_temperature=True).to(device)
 elif 'cifar' in args.dataset:
     arch = [1] + args.nits_arch
     nits_model = ConditionalNITS(d=3, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-5,
                                  A_constraint=args.constraint, arch=arch, autoregressive=True,
-                                 pixelrnn=True, normalize_inverse=True, final_layer_constraint=args.final_constraint).to(device)
+                                 pixelrnn=True, normalize_inverse=True,
+                                 final_layer_constraint=args.final_constraint,
+                                 softmax_temperature=True).to(device)
 tot_params = nits_model.tot_params
 loss_op = lambda real, params: discretized_nits_loss(real, params, nits_model)
 sample_op = lambda params: nits_sample(params, nits_model)
@@ -132,8 +133,29 @@ model = PixelCNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
                  input_channels=input_channels, nr_logistic_mix=tot_params, num_mix=1)
 model = model.to(device)
 
+model_name = 'lr_{:.5f}_nr_resnet{}_nr_filters{}_nits_arch{}_constraint{}_final_constraint{}_softmax_temperature{}'.format(
+# model_name = 'lr_{:.5f}_nr_resnet{}_nr_filters{}_nits_arch{}_constraint{}'.format(
+    args.lr, args.nr_resnet, args.nr_filters, args.nits_arch, args.constraint, args.final_constraint, args.softmax_temp)
+if os.path.exists(os.path.join('runs_test', model_name)):
+    shutil.rmtree(os.path.join('runs_test', model_name))
+    
+print('model_name:', model_name)
+
+latest_epoch = 0
 if args.load_params:
-    load_part_of_model(model, args.load_params)
+    if args.load_params == 'default':
+        for fname in os.listdir(args.save_dir):
+            if model_name in fname:
+                latest_epoch = max(int(fname.split('_')[-1].split('.')[0]), latest_epoch)
+                
+        if latest_epoch == 0:
+            raise ValueError('There should have been a saved model!')
+            
+        load_fname = '{}/{}_{}.pth'.format(args.save_dir, model_name, latest_epoch)
+    else:
+        load_fname = args.load_params
+        
+    load_part_of_model(model, load_fname)
     print('model parameters loaded')
 
 optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -156,7 +178,7 @@ def sample(model):
 
 print('starting training')
 writes = 0
-for epoch in range(args.max_epochs):
+for epoch in range(latest_epoch, args.max_epochs):
     model.train(True)
     torch.cuda.synchronize()
     train_loss = 0.
@@ -202,8 +224,15 @@ for epoch in range(args.max_epochs):
         del loss, output
 
     deno = batch_idx * args.batch_size * np.prod(obs) * np.log(2.)
-    print('test loss : {:4f}, lr : {:4e}'.format(test_loss / deno, optimizer.param_groups[0]['lr']))
     test_losses.append(test_loss / deno)
+    print('test loss : {:4f}, min test loss : {:4f}, lr : {:4e}'.format(
+        test_loss / deno,
+        np.min(test_losses),
+        optimizer.param_groups[0]['lr']
+    ))
+    
+    with open("{}/{}_test_losses.txt".format(args.save_dir, model_name), "a") as f:
+        f.write(str(test_loss / deno))
 
     if (epoch + 1) % args.save_interval == 0:
         torch.save(model.state_dict(), '{}/{}_{}.pth'.format(args.save_dir, model_name, epoch))

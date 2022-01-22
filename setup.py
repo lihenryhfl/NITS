@@ -9,7 +9,7 @@ setup(
        # the name must match the folder name 'verysimplemodule'
         name="nits",
         version=VERSION,
-        author="Jason Dsouza",
+        author="Henry Li",
         author_email="<youremail@email.com>",
         description=DESCRIPTION,
         long_description=LONG_DESCRIPTION,
