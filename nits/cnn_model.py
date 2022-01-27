@@ -5,17 +5,91 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn.utils import weight_norm as wn
 
-# UTIL
+class CNN(nn.Module):
+    def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200, input_channels=3):
+        super(CNN, self).__init__()
+        
+        def concat_elu(x):
+            axis = len(x.size()) - 3
+            return F.elu(torch.cat([x, -x], dim=axis))
+        self.resnet_nonlinearity = concat_elu
 
-def concat_elu(x):
-    axis = len(x.size()) - 3
-    return F.elu(torch.cat([x, -x], dim=axis))
+        self.nr_filters = nr_filters
+        self.input_channels = input_channels
+        self.nits_params = nits_params
+        self.right_shift_pad = nn.ZeroPad2d((1, 0, 0, 0))
+        self.down_shift_pad  = nn.ZeroPad2d((0, 0, 1, 0))
 
-def to_one_hot(tensor, n, fill_with=1.):
-    one_hot = torch.FloatTensor(tensor.size() + (n,)).zero_()
-    one_hot = one_hot.to(tensor.device)
-    one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
-    return Variable(one_hot)
+        down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
+        self.down_layers = nn.ModuleList([CNNLayerDown(down_nr_resnet[i], nr_filters,
+                                                self.resnet_nonlinearity) for i in range(3)])
+
+        self.up_layers   = nn.ModuleList([CNNLayerUp(nr_resnet, nr_filters,
+                                                self.resnet_nonlinearity) for _ in range(3)])
+
+        self.downsize_u_stream  = nn.ModuleList([DownShiftedConv2d(nr_filters, nr_filters,
+                                                    stride=(2,2)) for _ in range(2)])
+
+        self.downsize_ul_stream = nn.ModuleList([DownRightShiftedConv2d(nr_filters,
+                                                    nr_filters, stride=(2,2)) for _ in range(2)])
+
+        self.upsize_u_stream  = nn.ModuleList([DownShiftedDeconv2d(nr_filters, nr_filters,
+                                                    stride=(2,2)) for _ in range(2)])
+
+        self.upsize_ul_stream = nn.ModuleList([DownRightShiftedDeconv2d(nr_filters,
+                                                    nr_filters, stride=(2,2)) for _ in range(2)])
+
+        self.u_init = DownShiftedConv2d(input_channels + 1, nr_filters, filter_size=(2,3),
+                        shift_output_down=True)
+
+        self.ul_init = nn.ModuleList([DownShiftedConv2d(input_channels + 1, nr_filters,
+                                            filter_size=(1,3), shift_output_down=True),
+                                       DownRightShiftedConv2d(input_channels + 1, nr_filters,
+                                            filter_size=(2,1), shift_output_right=True)])
+
+        self.nin_out = NetworkInNetwork(nr_filters, nits_params)
+        self.init_padding = None
+
+
+    def forward(self, x, sample=False):
+        if self.init_padding is None and not sample:
+            xs = [int(y) for y in x.size()]
+            padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
+            self.init_padding = padding.to(x.device)
+
+        if sample :
+            xs = [int(y) for y in x.size()]
+            padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
+            padding = padding.to(x.device)
+            x = torch.cat((x, padding), 1)
+
+        x = x if sample else torch.cat((x, self.init_padding), 1)
+        u_list  = [self.u_init(x)]
+        ul_list = [self.ul_init[0](x) + self.ul_init[1](x)]
+        for i in range(3):
+            u_out, ul_out = self.up_layers[i](u_list[-1], ul_list[-1])
+            u_list  += u_out
+            ul_list += ul_out
+
+            if i != 2:
+                u_list  += [self.downsize_u_stream[i](u_list[-1])]
+                ul_list += [self.downsize_ul_stream[i](ul_list[-1])]
+
+        u  = u_list.pop()
+        ul = ul_list.pop()
+
+        for i in range(3):
+            u, ul = self.down_layers[i](u, ul, u_list, ul_list)
+
+            if i != 2 :
+                u  = self.upsize_u_stream[i](u)
+                ul = self.upsize_ul_stream[i](ul)
+
+        x_out = self.nin_out(F.elu(ul))
+
+        assert len(u_list) == len(ul_list) == 0, pdb.set_trace()
+
+        return x_out
 
 def down_shift(x, pad=None):
     # Pytorch ordering
@@ -33,9 +107,9 @@ def right_shift(x, pad=None):
     return pad(x)
 
 
-class nin(nn.Module):
+class NetworkInNetwork(nn.Module):
     def __init__(self, dim_in, dim_out):
-        super(nin, self).__init__()
+        super(NetworkInNetwork, self).__init__()
         self.lin_a = wn(nn.Linear(dim_in, dim_out))
         self.dim_out = dim_out
 
@@ -136,14 +210,14 @@ class DownRightShiftedDeconv2d(nn.Module):
 
 
 class GatedResNet(nn.Module):
-    def __init__(self, num_filters, conv_op, nonlinearity=concat_elu, skip_connection=0):
+    def __init__(self, num_filters, conv_op, nonlinearity, skip_connection=0):
         super(GatedResNet, self).__init__()
         self.skip_connection = skip_connection
         self.nonlinearity = nonlinearity
         self.conv_input = conv_op(2 * num_filters, num_filters)
 
         if skip_connection != 0 :
-            self.nin_skip = nin(2 * skip_connection * num_filters, num_filters)
+            self.nin_skip = NetworkInNetwork(2 * skip_connection * num_filters, num_filters)
 
         self.dropout = nn.Dropout2d(0.5)
         self.conv_out = conv_op(2 * num_filters, 2 * num_filters)
@@ -203,90 +277,3 @@ class CNNLayerDown(nn.Module):
             ul = self.ul_stream[i](ul, a=torch.cat((u, ul_list.pop()), 1))
 
         return u, ul
-
-
-class CNN(nn.Module):
-    def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200,
-                    resnet_nonlinearity='concat_elu', input_channels=3):
-        super(CNN, self).__init__()
-        if resnet_nonlinearity == 'concat_elu' :
-            self.resnet_nonlinearity = lambda x : concat_elu(x)
-        else :
-            raise Exception('right now only concat elu is supported as resnet nonlinearity.')
-
-        self.nr_filters = nr_filters
-        self.input_channels = input_channels
-        self.nits_params = nits_params
-        self.right_shift_pad = nn.ZeroPad2d((1, 0, 0, 0))
-        self.down_shift_pad  = nn.ZeroPad2d((0, 0, 1, 0))
-
-        down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
-        self.down_layers = nn.ModuleList([CNNLayerDown(down_nr_resnet[i], nr_filters,
-                                                self.resnet_nonlinearity) for i in range(3)])
-
-        self.up_layers   = nn.ModuleList([CNNLayerUp(nr_resnet, nr_filters,
-                                                self.resnet_nonlinearity) for _ in range(3)])
-
-        self.downsize_u_stream  = nn.ModuleList([DownShiftedConv2d(nr_filters, nr_filters,
-                                                    stride=(2,2)) for _ in range(2)])
-
-        self.downsize_ul_stream = nn.ModuleList([DownRightShiftedConv2d(nr_filters,
-                                                    nr_filters, stride=(2,2)) for _ in range(2)])
-
-        self.upsize_u_stream  = nn.ModuleList([DownShiftedDeconv2d(nr_filters, nr_filters,
-                                                    stride=(2,2)) for _ in range(2)])
-
-        self.upsize_ul_stream = nn.ModuleList([DownRightShiftedDeconv2d(nr_filters,
-                                                    nr_filters, stride=(2,2)) for _ in range(2)])
-
-        self.u_init = DownShiftedConv2d(input_channels + 1, nr_filters, filter_size=(2,3),
-                        shift_output_down=True)
-
-        self.ul_init = nn.ModuleList([DownShiftedConv2d(input_channels + 1, nr_filters,
-                                            filter_size=(1,3), shift_output_down=True),
-                                       DownRightShiftedConv2d(input_channels + 1, nr_filters,
-                                            filter_size=(2,1), shift_output_right=True)])
-
-        self.nin_out = nin(nr_filters, nits_params)
-        self.init_padding = None
-
-
-    def forward(self, x, sample=False):
-        if self.init_padding is None and not sample:
-            xs = [int(y) for y in x.size()]
-            padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
-            self.init_padding = padding.to(x.device)
-
-        if sample :
-            xs = [int(y) for y in x.size()]
-            padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
-            padding = padding.to(x.device)
-            x = torch.cat((x, padding), 1)
-
-        x = x if sample else torch.cat((x, self.init_padding), 1)
-        u_list  = [self.u_init(x)]
-        ul_list = [self.ul_init[0](x) + self.ul_init[1](x)]
-        for i in range(3):
-            u_out, ul_out = self.up_layers[i](u_list[-1], ul_list[-1])
-            u_list  += u_out
-            ul_list += ul_out
-
-            if i != 2:
-                u_list  += [self.downsize_u_stream[i](u_list[-1])]
-                ul_list += [self.downsize_ul_stream[i](ul_list[-1])]
-
-        u  = u_list.pop()
-        ul = ul_list.pop()
-
-        for i in range(3):
-            u, ul = self.down_layers[i](u, ul, u_list, ul_list)
-
-            if i != 2 :
-                u  = self.upsize_u_stream[i](u)
-                ul = self.upsize_ul_stream[i](ul)
-
-        x_out = self.nin_out(F.elu(ul))
-
-        assert len(u_list) == len(ul_list) == 0, pdb.set_trace()
-
-        return x_out

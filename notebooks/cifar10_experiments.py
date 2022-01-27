@@ -7,7 +7,7 @@ from torch.optim import lr_scheduler
 from torchvision import datasets, transforms, utils
 from nits.cnn_model import *
 from nits.model import NITS, ConditionalNITS
-from nits.discretized_mol import discretized_nits_loss, nits_sample
+from nits.discretized_mol import nits_loss, nits_sample
 
 def list_str_to_list(s):
     print(s)
@@ -102,7 +102,7 @@ elif 'cifar' in args.dataset:
                                  pixelrnn=True, normalize_inverse=True,
                                  final_layer_constraint=args.final_constraint,
                                  softmax_temperature=True).to(device)
-    
+
 tot_params = nits_model.tot_params
 loss_op = lambda real, params: nits_loss(real, params, nits_model, discretized=args.discretized)
 sample_op = lambda params: nits_sample(params, nits_model)
@@ -169,7 +169,7 @@ for epoch in range(latest_epoch, args.max_epochs):
             break
         optimizer.step()
         train_loss += loss.detach().cpu().numpy()
-        
+
         if (batch_idx +1) % args.print_every == 0 :
             deno = args.print_every * args.batch_size * np.prod(obs) * np.log(2.)
             print('loss : {:.4f}, time : {:.4f}'.format(
