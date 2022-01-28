@@ -7,7 +7,6 @@ from torch.optim import lr_scheduler
 from torchvision import datasets, transforms, utils
 from nits.cnn_model import *
 from nits.model import NITS, ConditionalNITS
-from nits.discretized_mol import nits_loss, nits_sample
 
 def list_str_to_list(s):
     print(s)
@@ -24,8 +23,8 @@ parser = argparse.ArgumentParser()
 
 # data
 parser.add_argument('-g', '--gpu', type=str, default='')
-parser.add_argument('-i', '--data_dir', type=str, default='/data/pixelcnn/data/')
-parser.add_argument('-o', '--save_dir', type=str, default='/data/pixelcnn/models/')
+parser.add_argument('-i', '--data_dir', type=str, default='data/')
+parser.add_argument('-o', '--save_dir', type=str, default='models/')
 parser.add_argument('-d', '--dataset', type=str, default='cifar')
 parser.add_argument('-p', '--print_every', type=int, default=50)
 parser.add_argument('-t', '--save_interval', type=int, default=10)
@@ -58,14 +57,10 @@ args = parser.parse_args()
 device = 'cuda:' + args.gpu if args.gpu else 'cpu'
 print('device:', device)
 
-# HOUSEKEEPING
-
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 
 sample_batch_size = 25
-obs = (1, 28, 28) if 'mnist' in args.dataset else (3, 32, 32)
-input_channels = obs[0]
 rescaling     = lambda x : (x - .5) * 2.
 rescaling_inv = lambda x : .5 * x  + .5
 kwargs = {'num_workers':1, 'pin_memory':True, 'drop_last':True}
@@ -78,14 +73,22 @@ if 'mnist' in args.dataset :
 
     test_loader  = torch.utils.data.DataLoader(datasets.MNIST(args.data_dir, train=False,
                     transform=ds_transforms), batch_size=args.batch_size, shuffle=True, **kwargs)
+    obs = (1, 28, 28)
 elif 'cifar' in args.dataset :
     train_loader = torch.utils.data.DataLoader(datasets.CIFAR10(args.data_dir, train=True,
         download=True, transform=ds_transforms), batch_size=args.batch_size, shuffle=True, **kwargs)
 
     test_loader  = torch.utils.data.DataLoader(datasets.CIFAR10(args.data_dir, train=False,
                     transform=ds_transforms), batch_size=args.batch_size, shuffle=True, **kwargs)
-else :
-    raise Exception('{} dataset not in {mnist, cifar10}'.format(args.dataset))
+    obs = (3, 32, 32)
+elif 'bsds300' in args.dataset :
+    from maf.datasets import bsds300
+    data = bsds300.BSDS300()
+
+    train_loader = Batcher(torch.tensor(data.trn.x).to(device), args.batch_size)
+    val_loader = Batcher(torch.tensor(data.val.x).to(device), args.batch_size)
+    test_loader = Batcher(torch.tensor(data.tst.x).to(device), args.batch_size)
+    obs = (1, 8, 8)
 
 
 # INITIALIZE NITS MODEL
@@ -96,17 +99,24 @@ if 'mnist' in args.dataset:
                       final_layer_constraint=args.final_constraint,
                       softmax_temperature=True).to(device)
 elif 'cifar' in args.dataset:
-    arch = [1] + args.nits_arch
-    nits_model = ConditionalNITS(d=3, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-5,
+    arch = [3] + args.nits_arch
+    nits_model = ConditionalNITS(d=3, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-3,
                                  A_constraint=args.constraint, arch=arch, autoregressive=True,
-                                 pixelrnn=True, normalize_inverse=True,
+                                 pixelrnn=False, normalize_inverse=True,
                                  final_layer_constraint=args.final_constraint,
                                  softmax_temperature=True).to(device)
+elif 'bsds300' in args.dataset:
+    arch = [1] + args.nits_arch
+    nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-5,
+                      A_constraint=args.constraint, arch=arch,
+                      final_layer_constraint=args.final_constraint,
+                      softmax_temperature=True).to(device)
 
 tot_params = nits_model.tot_params
-loss_op = lambda real, params: nits_loss(real, params, nits_model, discretized=args.discretized)
-sample_op = lambda params: nits_sample(params, nits_model)
+loss_op = lambda real, params: cnn_nits_loss(real, params, nits_model, discretized=args.discretized)
+sample_op = lambda params: cnn_nits_sample(params, nits_model)
 
+input_channels = obs[0]
 model = CNN(nr_resnet=5, nr_filters=150,
                  input_channels=input_channels, nits_params=tot_params)
 model = model.to(device)
@@ -115,23 +125,6 @@ model_name = 'lr_{:.5f}_nits_arch{}_constraint{}_final_constraint{}_softmax_temp
     args.lr, args.nits_arch, args.constraint, args.final_constraint, args.softmax_temp)
 
 print('model_name:', model_name)
-
-latest_epoch = 0
-if args.load_params:
-    if args.load_params == 'default':
-        for fname in os.listdir(args.save_dir):
-            if model_name in fname:
-                latest_epoch = max(int(fname.split('_')[-1].split('.')[0]), latest_epoch)
-
-        if latest_epoch == 0:
-            raise ValueError('There should have been a saved model!')
-
-        load_fname = '{}/{}_{}.pth'.format(args.save_dir, model_name, latest_epoch)
-    else:
-        load_fname = args.load_params
-
-    load_part_of_model(model, load_fname)
-    print('model parameters loaded')
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 scheduler = lr_scheduler.StepLR(optimizer, step_size=1, gamma=args.lr_decay)
@@ -152,7 +145,7 @@ def sample(model):
 
 print('starting training')
 writes = 0
-for epoch in range(latest_epoch, args.max_epochs):
+for epoch in range(args.max_epochs):
     model.train(True)
     train_loss = 0.
     time_ = time.time()

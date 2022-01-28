@@ -18,24 +18,24 @@ print('device:', device)
 
 if args.dataset == 'gas':
     data = gas.GAS()
-    model_arch = [128, 512]
+    model_arch = [256, 256]
     nits_arch = [16, 16, 1]
     gamma = 1 - 1e-3
 elif args.dataset == 'power':
     data = power.POWER()
-    model_arch = [512, 512]
+    model_arch = [256, 256]
     nits_arch = [16, 16, 1]
     gamma = 1 - 1e-3
 elif args.dataset == 'miniboone':
     data = miniboone.MINIBOONE()
-    model_arch = [64, 256]
+    model_arch = [128, 128]
     nits_arch = [16, 16, 1]
-    gamma = 1 - 1e-4
+    gamma = 1 - 5e-4
 elif args.dataset == 'hepmass':
     data = hepmass.HEPMASS()
     model_arch = [256, 256]
     nits_arch = [16, 16, 1]
-    gamma = 1 - 1e-4
+    gamma = 1 - 5e-4
 elif args.dataset == 'bsds300':
     data = bsds300.BSDS300()
     model_arch = [1024, 1024]
@@ -46,8 +46,6 @@ d = data.trn.x.shape[1]
 
 max_val = max(data.trn.x.max(), data.val.x.max(), data.tst.x.max())
 min_val = min(data.trn.x.min(), data.val.x.min(), data.tst.x.min())
-max_val = max(5., (max_val - min_val) / 2 + max_val)
-min_val = min(-5., min_val - (max_val - min_val) / 2)
 max_val, min_val = torch.tensor(max_val).to(device).float(), torch.tensor(min_val).to(device).float()
 
 nits_model = NITS(d=d, start=min_val, end=max_val, monotonic_const=1e-4,

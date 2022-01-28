@@ -5,10 +5,100 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn.utils import weight_norm as wn
 
+def ll_to_bpd(ll, dataset='cifar', bits=8):
+    if dataset == 'cifar':
+        n_pixels = (32 ** 2) * 3
+    elif dataset == 'mnist:
+        n_pixels = (28 ** 2)
+        
+    bpd = -((ll / n_pixels) - np.log(2 ** (bits - 1))) / np.log(2)
+    return bpd
+
+def cnn_nits_loss(x, params, nits_model, eps=1e-7, discretized=False):
+    x = x.permute(0, 2, 3, 1)
+    params = params.permute(0, 2, 3, 1)
+
+    nits_model = nits_model.to(x.device)
+    x = x.reshape(-1, nits_model.d)
+    params = params.reshape(-1, nits_model.tot_params)
+
+    if nits_model.normalize_inverse:
+        pre_cdf = nits_model.cdf
+        pre_pdf = nits_model.pdf
+    else:
+        pre_cdf = nits_model.forward_
+        pre_pdf = nits_model.backward_
+
+    if nits_model.pixelrnn:
+        cdf = lambda x_, params: pre_cdf(x_, params, x_unrounded=x)
+        pdf = lambda x_, params: pre_pdf(x_, params, x_unrounded=x)
+    else:
+        cdf = pre_cdf
+        pdf = pre_pdf
+    
+    if discretized:
+        x_plus = (x * 127.5 + .5).round() / 127.5
+        x_min = (x * 127.5 - .5).round() / 127.5
+        
+        cdf_plus = cdf(x_plus, params).clamp(max=1-eps, min=eps)
+        cdf_min = cdf(x_min, params).clamp(max=1-eps, min=eps)
+
+        cdf_delta = cdf_plus - cdf_min
+        log_cdf_plus = (cdf_plus).log()
+        log_one_minus_cdf_min = (1 - cdf_min).log()
+        log_pdf_mid = (pdf(x, params) + eps).log()
+    
+        inner_inner_cond = (cdf_delta > 1e-5).float()
+        inner_inner_out  = inner_inner_cond * torch.clamp(cdf_delta, min=1e-12).log() + (1. - inner_inner_cond) * (log_pdf_mid - np.log(127.5))
+        inner_cond       = (x > 0.999).float()
+        inner_out        = inner_cond * log_one_minus_cdf_min + (1. - inner_cond) * inner_inner_out
+        cond             = (x < -0.999).float()
+        log_probs        = cond * log_cdf_plus + (1. - cond) * inner_out
+    else:
+        log_probs = (pdf(x, params) + eps).log()
+
+    return -log_probs.sum()
+
+def cnn_nits_sample(params, nits_model):
+    params = params.permute(0, 2, 3, 1)
+    batch_size, height, width, params_per_pixel = params.shape
+
+    nits_model = nits_model.to(params.device)
+
+    imgs = nits_model.sample(1, params.reshape(-1, nits_model.tot_params)).clamp(min=-1., max=1.)
+    imgs = imgs.reshape(batch_size, height, width, nits_model.d).permute(0, 3, 1, 2)
+
+    return imgs
+
+class Batcher:
+    def __init__(self, x, batch_size):
+        self.orig_x = x
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        self.idx = 0
+        p = torch.randperm(len(self.orig_x))
+        self.x = self.orig_x[p]
+
+        return self
+
+    def process_x(self, x):
+        x = torch.cat([x, torch.zeros((len(x), 1), device=device) + x[:,-1].unsqueeze(-1)], axis=1)
+        x = x.reshape(-1, 8, 8).unsqueeze(1)
+        return x
+
+    def __next__(self):
+        if self.idx + self.batch_size < len(self.x):
+            x_ = self.process_x(self.x[self.idx:self.idx+self.batch_size])
+            self.idx += self.batch_size
+            return x_, None
+
+        raise StopIteration
+
 class CNN(nn.Module):
     def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200, input_channels=3):
         super(CNN, self).__init__()
-        
+
         def concat_elu(x):
             axis = len(x.size()) - 3
             return F.elu(torch.cat([x, -x], dim=axis))
@@ -92,7 +182,6 @@ class CNN(nn.Module):
         return x_out
 
 def down_shift(x, pad=None):
-    # Pytorch ordering
     xs = [int(y) for y in x.size()]
     x = x[:, :, :xs[2] - 1, :]
     pad = nn.ZeroPad2d((0, 0, 1, 0)) if pad is None else pad
@@ -100,7 +189,6 @@ def down_shift(x, pad=None):
 
 
 def right_shift(x, pad=None):
-    # Pytorch ordering
     xs = [int(y) for y in x.size()]
     x = x[:, :, :, :xs[3] - 1]
     pad = nn.ZeroPad2d((1, 0, 0, 0)) if pad is None else pad
