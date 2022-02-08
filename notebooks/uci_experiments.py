@@ -16,11 +16,12 @@ args = parser.parse_args()
 device = 'cuda:' + args.gpu if args.gpu else 'cpu'
 print('device:', device)
 
+lr = 1e-3
 if args.dataset == 'gas':
     data = gas.GAS()
     model_arch = [256, 256]
     nits_arch = [16, 16, 1]
-    gamma = 1 - 1e-3
+    gamma = 1 - 1e-4
 elif args.dataset == 'power':
     data = power.POWER()
     model_arch = [256, 256]
@@ -30,12 +31,12 @@ elif args.dataset == 'miniboone':
     data = miniboone.MINIBOONE()
     model_arch = [128, 128]
     nits_arch = [16, 16, 1]
-    gamma = 1 - 5e-4
+    gamma = 1 - 1e-4
 elif args.dataset == 'hepmass':
     data = hepmass.HEPMASS()
     model_arch = [256, 256]
     nits_arch = [16, 16, 1]
-    gamma = 1 - 5e-4
+    gamma = 1 - 1e-4
 elif args.dataset == 'bsds300':
     data = bsds300.BSDS300()
     model_arch = [1024, 1024]
@@ -55,49 +56,39 @@ nits_model = NITS(d=d, start=min_val, end=max_val, monotonic_const=1e-4,
 
 model = ParamModel(arch=[d] + model_arch + [nits_model.n_params]).to(device)
 
-def create_batcher(x, y=None, batch_size=1):
+def create_batcher(x, batch_size=1, device=device):
     idx = 0
     p = torch.randperm(len(x))
     x = x[p]
-    
-    if y is not None:
-        y = y[p]
-    
+
     while idx + batch_size < len(x):
-        if y is None:
-            yield x[idx:idx+batch_size]
-        else:
-            yield x[idx:idx+batch_size], y[idx:idx+batch_size]
+        yield torch.tensor(x[idx:idx+batch_size], device=device)
         idx += batch_size
     else:
-        if y is None:
-            yield x[idx:]
-        else:
-            yield x[idx:], y[idx:]
-            
+        yield torch.tensor(x[idx:], device=device)
+
 max_epochs = 20000
 print_every = 500
 batch_size = 512
-optim = torch.optim.Adam(model.parameters(), lr=1e-3)
+optim = torch.optim.Adam(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optim, step_size=1, gamma=gamma)
 
 for epoch in range(max_epochs):
     train_ll = 0.
     for i, x in enumerate(create_batcher(data.trn.x, batch_size=batch_size)):
-        x = torch.tensor(x, device=device)
         params = model(x)
         params.retain_grad()
         ll = (nits_model.pdf(x, params) + 1e-5).log().sum()
         loss = -ll
-        
+
         optim.zero_grad()
         loss.backward()
         train_ll += ll
-        
+
         assert params.grad.isfinite().all()
-        
+
         optim.step()
-                
+
         if i % print_every == print_every - 1:
             train_ll = train_ll / print_every / batch_size
             start = nits_model.forward_(nits_model.start, params)
@@ -105,7 +96,7 @@ for epoch in range(max_epochs):
             min_end_start = (end - start).min()
             print('train ll: {:.4f}, min end - start: {:.4e}'.format(train_ll, min_end_start))
             train_ll = 0.
-        
+
     with torch.no_grad():
         val_ll = 0.
         lr = optim.param_groups[0]['lr']
@@ -116,9 +107,9 @@ for epoch in range(max_epochs):
             val_ll += ll.sum()
 
         print('epoch: {:4d}, val_ll: {:4f}, lr: {:.4e}'.format(epoch, val_ll / data.val.N, lr))
-        
+
     scheduler.step()
-    
+
 with torch.no_grad():
     test_ll = 0.
     for x in create_batcher(data.tst.x, batch_size=128):

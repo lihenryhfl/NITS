@@ -38,7 +38,7 @@ parser.add_argument('-x', '--max_epochs', type=int, default=5000)
 parser.add_argument('-s', '--seed', type=int, default=1)
 
 # nits model
-parser.add_argument('-a', '--nits_arch', type=list_str_to_list, default='[8,8,1]',
+parser.add_argument('-a', '--nits_arch', type=list_str_to_list, default='[16,16,1]',
                    help='Architecture of NITS PNN')
 parser.add_argument('-nb', '--nits_bound', type=float, default=5.,
                     help='Upper and lower bound of NITS model')
@@ -99,10 +99,10 @@ if 'mnist' in args.dataset:
                       final_layer_constraint=args.final_constraint,
                       softmax_temperature=True).to(device)
 elif 'cifar' in args.dataset:
-    arch = [3] + args.nits_arch
+    arch = [1] + args.nits_arch
     nits_model = ConditionalNITS(d=3, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-3,
                                  A_constraint=args.constraint, arch=arch, autoregressive=True,
-                                 pixelrnn=False, normalize_inverse=True,
+                                 pixelrnn=True, normalize_inverse=True,
                                  final_layer_constraint=args.final_constraint,
                                  softmax_temperature=True).to(device)
 elif 'bsds300' in args.dataset:
@@ -117,7 +117,7 @@ loss_op = lambda real, params: cnn_nits_loss(real, params, nits_model, discretiz
 sample_op = lambda params: cnn_nits_sample(params, nits_model)
 
 input_channels = obs[0]
-model = CNN(nr_resnet=5, nr_filters=150,
+model = CNN(nr_resnet=5, nr_filters=160,
                  input_channels=input_channels, nits_params=tot_params)
 model = model.to(device)
 
@@ -164,9 +164,15 @@ for epoch in range(args.max_epochs):
         train_loss += loss.detach().cpu().numpy()
 
         if (batch_idx +1) % args.print_every == 0 :
-            deno = args.print_every * args.batch_size * np.prod(obs) * np.log(2.)
+            if args.discretized:
+                deno = args.print_every * args.batch_size * np.prod(obs) * np.log(2.)
+                train_loss = train_loss / deno;
+            else:
+                deno = args.print_every * args.batch_size
+                train_loss = train_loss / deno;
+                train_loss = ll_to_bpd(-train_loss, dataset=args.dataset)
             print('loss : {:.4f}, time : {:.4f}'.format(
-                (train_loss / deno),
+                (train_loss),
                 (time.time() - time_)))
             train_loss = 0.
             writes += 1
@@ -187,7 +193,13 @@ for epoch in range(args.max_epochs):
         test_loss += loss.detach().cpu().numpy()
         del loss, output
 
-    test_losses.append(test_loss / (batch_idx * args.batch_size * np.prod(obs) * np.log(2.)))
+    if args.discretized:
+        test_loss = test_loss / (batch_idx * args.batch_size * np.prod(obs) * np.log(2.))
+    else:
+        test_loss = test_loss / (batch_idx * args.batch_size)
+        test_loss = ll_to_bpd(-test_loss, dataset=args.dataset)
+
+    test_losses.append(test_loss)
     print('test loss : {:4f}, min test loss : {:4f}, lr : {:4e}'.format(
         test_losses[-1],
         np.min(test_losses),

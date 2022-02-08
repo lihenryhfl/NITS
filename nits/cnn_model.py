@@ -1,5 +1,6 @@
 import pdb
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
@@ -8,7 +9,7 @@ from torch.nn.utils import weight_norm as wn
 def ll_to_bpd(ll, dataset='cifar', bits=8):
     if dataset == 'cifar':
         n_pixels = (32 ** 2) * 3
-    elif dataset == 'mnist:
+    elif dataset == 'mnist':
         n_pixels = (28 ** 2)
         
     bpd = -((ll / n_pixels) - np.log(2 ** (bits - 1))) / np.log(2)

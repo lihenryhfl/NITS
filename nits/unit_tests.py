@@ -27,8 +27,9 @@ for A_constraint in ['neg_exp', 'exp']:
         d = 1
         arch = [d] + base_arch
         model = NITS(d=d, start=start, end=end, arch=arch,
-                             monotonic_const=monotonic_const, A_constraint=A_constraint,
-                             final_layer_constraint=final_layer_constraint).to(device)
+                     monotonic_const=monotonic_const, A_constraint=A_constraint,
+                     final_layer_constraint=final_layer_constraint,
+                     softmax_temperature=True).to(device)
         params = torch.randn((n, d * model.n_params)).to(device)
 
         ############################
@@ -68,6 +69,7 @@ for A_constraint in ['neg_exp', 'exp']:
 
         autograd_outs = zs_params_to_forwards(z, params)
         outs = model.forward_(z, params)
+        print((autograd_outs - outs).norm())
         assert torch.allclose(autograd_outs, outs, atol=1e-4)
 
         def zs_params_to_cdfs(zs, params):
@@ -176,7 +178,7 @@ params = torch.randn((n, model.n_params, 1, 1))
 z = torch.randn((n, 1, 1, 1))
 
 loss1 = discretized_mix_logistic_loss_1d(z, params)
-loss2 = discretized_nits_loss(z, params, nits_model=model)
+loss2 = cnn_nits_loss(z, params, nits_model=model, discretized=True)
 
 assert (loss1 - loss2).norm() < 1e-2, (loss1 - loss2).norm()
 
@@ -185,7 +187,7 @@ model = NITS(d=1, start=-1e7, end=1e7, arch=[1, 10, 1],
                      final_layer_constraint='softmax', softmax_temperature=False).to(device)
 
 loss1 = discretized_mix_logistic_loss_1d(z, params)
-loss2 = discretized_nits_loss(z, params, nits_model=model)
+loss2 = cnn_nits_loss(z, params, nits_model=model, discretized=True)
 
 assert (loss1 - loss2).norm() < 1e-3, (loss1 - loss2).norm()
 
