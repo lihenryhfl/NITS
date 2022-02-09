@@ -119,24 +119,24 @@ class AttentionBlock(nn.Module):
         ul_b = torch.cat([ul, b], axis=1)
         x_ul_b = torch.cat([x, ul_b], axis=1)
                         
-        # compute attention
+        # compute attention -- presoftmax[:,i,j] = <queries[:,:,i], keys[:,:,j]>
         keys = self.nin_k(self.grn_k(x_ul_b)).reshape(n, self.K, h * w)
         queries = self.nin_q(self.grn_q(ul_b)).reshape(n, self.K, h * w)
         values = self.nin_v(self.grn_v(x_ul_b)).reshape(n, self.V, h * w)
-        value_presoftmax = torch.einsum('nji,njk->nki', keys, queries)
+        presoftmax = torch.einsum('nji,njk->nki', keys, queries)
         
         # apply causal mask and softmax
-        value_presoftmax = value_presoftmax * self.get_causal_mask(h * w, x.device).T
-        value_weights = F.softmax(value_presoftmax, dim=-1)
+        presoftmax = presoftmax * self.get_causal_mask(h * w, x.device)
+        att_weights = F.softmax(presoftmax, dim=-1)
                 
         # apply attention
-        w_values = torch.einsum('nji,nkj->nki', value_weights, values)
+        att_values = torch.einsum('nij,nkj->nki', att_weights, values)
         
         # reshape
-        w_values = w_values.reshape(n, self.V, h, w)
+        att_values = att_values.reshape(n, self.V, h, w)
         
         # add back ul
-        result = self.grn_out(ul, a=w_values)
+        result = self.grn_out(ul, a=att_values)
         
         return result
         

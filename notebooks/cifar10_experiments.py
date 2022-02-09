@@ -50,6 +50,8 @@ parser.add_argument('-st', '--softmax_temp', type=bool, default=True,
                     help='Use of softmax temperature')
 parser.add_argument('-ds', '--discretized', type=bool, default=False,
                     help='Discretized NITS')
+parser.add_argument('-at', '--attention', type=bool, default=False,
+                    help='Discretized NITS')
 
 
 args = parser.parse_args()
@@ -117,14 +119,18 @@ loss_op = lambda real, params: cnn_nits_loss(real, params, nits_model, discretiz
 sample_op = lambda params: cnn_nits_sample(params, nits_model)
 
 input_channels = obs[0]
-model = CNN(nr_resnet=5, nr_filters=160,
+if args.attention:
+    model = ACNN(nr_resnet=5, nr_filters=256,
                  input_channels=input_channels, nits_params=tot_params)
-# model = ACNN(nr_resnet=5, nr_filters=256,
-#                  input_channels=input_channels, nits_params=tot_params)
+else:
+    model = CNN(nr_resnet=5, nr_filters=160,
+                 input_channels=input_channels, nits_params=tot_params)
+
 model = model.to(device)
 
-model_name = 'lr_{:.5f}_nits_arch{}_constraint{}_final_constraint{}_softmax_temperature{}'.format(
-    args.lr, str(args.nits_arch).replace(' ', ''), args.constraint, args.final_constraint, args.softmax_temp)
+model_name = 'lr_{:.5f}_nits_arch{}_constraint{}_final_constraint{}_softmax_temperature{}_attention{}'.format(
+    args.lr, str(args.nits_arch).replace(' ', ''), args.constraint, args.final_constraint, 
+    args.softmax_temp, args.attention)
 
 print('model_name:', model_name)
 
