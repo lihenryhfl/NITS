@@ -96,13 +96,128 @@ class Batcher:
 
         raise StopIteration
 
+class AttentionBlock(nn.Module):
+    def __init__(self, x_dim, num_filters, K=16):
+        super(AttentionBlock, self).__init__()
+        self.K = K
+        self.V = num_filters // 2
+        self.grn_k = GatedResNet(x_dim * 3 + num_filters, NetworkInNetwork)
+        self.grn_q = GatedResNet(x_dim * 2 + num_filters, NetworkInNetwork)
+        self.grn_v = GatedResNet(x_dim * 3 + num_filters, NetworkInNetwork)
+        self.nin_k = NetworkInNetwork(x_dim * 3 + num_filters, self.K)
+        self.nin_q = NetworkInNetwork(x_dim * 2 + num_filters, self.K)
+        self.nin_v = NetworkInNetwork(x_dim * 3 + num_filters, self.V)
+        self.grn_out = GatedResNet(num_filters, NetworkInNetwork, skip_connection=0.5)
+        
+    def get_causal_mask(self, n, device):
+        mask = torch.tril(torch.ones((n, n), device=device), diagonal=-1)
+        return mask
+        
+    def forward(self, x, ul, b):
+        n, c, h, w = x.shape
+        
+        ul_b = torch.cat([ul, b], axis=1)
+        x_ul_b = torch.cat([x, ul_b], axis=1)
+                        
+        # compute attention
+        keys = self.nin_k(self.grn_k(x_ul_b)).reshape(n, self.K, h * w)
+        queries = self.nin_q(self.grn_q(ul_b)).reshape(n, self.K, h * w)
+        values = self.nin_v(self.grn_v(x_ul_b)).reshape(n, self.V, h * w)
+        value_presoftmax = torch.einsum('nji,njk->nki', keys, queries)
+        
+        # apply causal mask and softmax
+        value_presoftmax = value_presoftmax * self.get_causal_mask(h * w, x.device).T
+        value_weights = F.softmax(value_presoftmax, dim=-1)
+                
+        # apply attention
+        w_values = torch.einsum('nji,nkj->nki', value_weights, values)
+        
+        # reshape
+        w_values = w_values.reshape(n, self.V, h, w)
+        
+        # add back ul
+        result = self.grn_out(ul, a=w_values)
+        
+        return result
+        
+class ACNN(nn.Module):
+    def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200, input_channels=3, n_layers=3):
+        super(ACNN, self).__init__()
+        
+        self.resnet_nonlinearity = concat_elu
+
+        self.nr_filters = nr_filters
+        self.input_channels = input_channels
+        self.nits_params = nits_params
+        self.right_shift_pad = nn.ZeroPad2d((1, 0, 0, 0))
+        self.down_shift_pad  = nn.ZeroPad2d((0, 0, 1, 0))
+        self.n_layers = n_layers
+
+        down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
+        self.layers = nn.ModuleList([ACNNLayer(nr_resnet, nr_filters,
+                                                self.resnet_nonlinearity) for _ in range(self.n_layers)])
+        
+        self.att_layers = nn.ModuleList([AttentionBlock(input_channels, nr_filters) for _ in range(self.n_layers)])
+
+        self.ul_init = nn.ModuleList([DownShiftedConv2d(input_channels + 1, nr_filters,
+                                            filter_size=(1,3), shift_output_down=True),
+                                       DownRightShiftedConv2d(input_channels + 1, nr_filters,
+                                            filter_size=(2,1), shift_output_right=True)])
+
+        self.nin_out = NetworkInNetwork(nr_filters, nits_params)
+        
+    def get_background(self, x):
+        xs = [int(k) for k in x.shape]
+        background = torch.cat(
+            [
+                ((torch.arange(xs[2], device=x.device).float() - xs[2] / 2) / xs[2])[None, None, :, None] + 0. * x,
+                ((torch.arange(xs[3], device=x.device).float() - xs[3] / 2) / xs[3])[None, None, None, :] + 0. * x,
+            ],
+            axis=1
+            )
+        
+        return background
+
+    def forward(self, x, sample=False):
+        if not hasattr(self, 'init_padding') or len(self.init_padding) != len(x):
+            xs = [int(y) for y in x.size()]
+            padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
+            self.init_padding = padding.to(x.device)
+        
+        background = self.get_background(x)
+        x_pad = torch.cat((x, self.init_padding), 1)
+        ul = self.ul_init[0](x_pad) + self.ul_init[1](x_pad)
+        
+        for i in range(self.n_layers):
+            ul = self.layers[i](ul)
+            ul = self.att_layers[i](x, ul, background)
+
+        x_out = self.nin_out(F.elu(ul))
+
+        return x_out
+    
+class ACNNLayer(nn.Module):
+    def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity):
+        super(ACNNLayer, self).__init__()
+        self.nr_resnet = nr_resnet
+        self.ul_stream = nn.ModuleList([GatedResNet(nr_filters, DownRightShiftedConv2d,
+                                        resnet_nonlinearity, skip_connection=0)
+                                            for _ in range(nr_resnet)])
+
+    def forward(self, ul):
+        for i in range(self.nr_resnet):
+            ul = self.ul_stream[i](ul)
+
+        return ul
+    
+def concat_elu(x):
+    axis = len(x.size()) - 3
+    return F.elu(torch.cat([x, -x], dim=axis))
+
 class CNN(nn.Module):
     def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200, input_channels=3):
         super(CNN, self).__init__()
 
-        def concat_elu(x):
-            axis = len(x.size()) - 3
-            return F.elu(torch.cat([x, -x], dim=axis))
         self.resnet_nonlinearity = concat_elu
 
         self.nr_filters = nr_filters
@@ -139,22 +254,15 @@ class CNN(nn.Module):
                                             filter_size=(2,1), shift_output_right=True)])
 
         self.nin_out = NetworkInNetwork(nr_filters, nits_params)
-        self.init_padding = None
 
 
-    def forward(self, x, sample=False):
-        if self.init_padding is None and not sample:
+    def forward(self, x):
+        if not hasattr(self, 'init_padding') or len(self.init_padding) != len(x):
             xs = [int(y) for y in x.size()]
             padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
             self.init_padding = padding.to(x.device)
 
-        if sample :
-            xs = [int(y) for y in x.size()]
-            padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
-            padding = padding.to(x.device)
-            x = torch.cat((x, padding), 1)
-
-        x = x if sample else torch.cat((x, self.init_padding), 1)
+        x = torch.cat((x, self.init_padding), 1)
         u_list  = [self.u_init(x)]
         ul_list = [self.ul_init[0](x) + self.ul_init[1](x)]
         for i in range(3):
@@ -195,21 +303,54 @@ def right_shift(x, pad=None):
     pad = nn.ZeroPad2d((1, 0, 0, 0)) if pad is None else pad
     return pad(x)
 
+class ChannelLinear(nn.Module):
+    def __init__(self, dim_in, dim_out):
+        super(ChannelLinear, self).__init__()
+        self.dim_in, self.dim_out = dim_in, dim_out
+        k = 1 / dim_in
+        sqrt_k = np.sqrt(k)
+        self.weight = torch.rand(size=(dim_in, dim_out)) * 2 * sqrt_k - sqrt_k
+        self.b = torch.rand(size=(dim_out, 1)) * 2 * sqrt_k - sqrt_k
+        
+        self.weight, self.b = nn.Parameter(self.weight), nn.Parameter(self.b)
+        
+    def forward(self, x):
+        assert len(x.shape) == 4
+        xs = [int(k) for k in x.shape]
+        assert xs[1] == self.dim_in, 'xs[1]: {}, self.dim_in: {}'.format(xs[1], self.dim_in)
+        x = x.reshape(xs[0], xs[1], 1, xs[2], xs[3])
+        y = torch.einsum('ij,njkml->nikml', self.weight.T, x) + self.b.reshape(-1, self.dim_out, 1, 1, 1)
+                
+        return y[:,:,0,:,:]
 
 class NetworkInNetwork(nn.Module):
-    def __init__(self, dim_in, dim_out):
+    def __init__(self, dim_in, dim_out, permute=True):
         super(NetworkInNetwork, self).__init__()
-        self.lin_a = wn(nn.Linear(dim_in, dim_out))
+        self.lin_a = wn(ChannelLinear(dim_in, dim_out))
         self.dim_out = dim_out
+        self.permute = permute
 
     def forward(self, x):
         """ a network in network layer (1x1 CONV) """
-        x = x.permute(0, 2, 3, 1)
         shp = [int(y) for y in x.size()]
-        out = self.lin_a(x.contiguous().view(shp[0]*shp[1]*shp[2], shp[3]))
-        shp[-1] = self.dim_out
-        out = out.view(shp)
-        return out.permute(0, 3, 1, 2)
+        out = self.lin_a(x)
+        return out
+
+# class NetworkInNetwork(nn.Module):
+#     def __init__(self, dim_in, dim_out, permute=True):
+#         super(NetworkInNetwork, self).__init__()
+#         self.lin_a = wn(nn.Linear(dim_in, dim_out))
+#         self.dim_out = dim_out
+#         self.permute = permute
+
+#     def forward(self, x):
+#         """ a network in network layer (1x1 CONV) """
+#         x = x.permute(0, 2, 3, 1) if self.permute else x
+#         shp = [int(y) for y in x.size()]
+#         out = self.lin_a(x.contiguous().view(shp[0]*shp[1]*shp[2], shp[3]))
+#         shp[-1] = self.dim_out
+#         out = out.view(shp)
+#         return out.permute(0, 3, 1, 2) if self.permute else out
 
 
 class DownShiftedConv2d(nn.Module):
@@ -299,14 +440,14 @@ class DownRightShiftedDeconv2d(nn.Module):
 
 
 class GatedResNet(nn.Module):
-    def __init__(self, num_filters, conv_op, nonlinearity, skip_connection=0):
+    def __init__(self, num_filters, conv_op, nonlinearity=concat_elu, skip_connection=0):
         super(GatedResNet, self).__init__()
         self.skip_connection = skip_connection
         self.nonlinearity = nonlinearity
         self.conv_input = conv_op(2 * num_filters, num_filters)
 
-        if skip_connection != 0 :
-            self.nin_skip = NetworkInNetwork(2 * skip_connection * num_filters, num_filters)
+        if skip_connection != 0:
+            self.nin_skip = NetworkInNetwork(int(2 * skip_connection * num_filters), num_filters)
 
         self.dropout = nn.Dropout2d(0.5)
         self.conv_out = conv_op(2 * num_filters, 2 * num_filters)
@@ -327,7 +468,7 @@ class CNNLayerUp(nn.Module):
     def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity):
         super(CNNLayerUp, self).__init__()
         self.nr_resnet = nr_resnet
-        self.u_stream = nn.ModuleList([GatedResNet(nr_filters, DownShiftedConv2d,
+        self.u_stream  = nn.ModuleList([GatedResNet(nr_filters, DownShiftedConv2d,
                                         resnet_nonlinearity, skip_connection=0)
                                             for _ in range(nr_resnet)])
 
@@ -366,3 +507,4 @@ class CNNLayerDown(nn.Module):
             ul = self.ul_stream[i](ul, a=torch.cat((u, ul_list.pop()), 1))
 
         return u, ul
+    

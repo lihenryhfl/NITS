@@ -119,10 +119,12 @@ sample_op = lambda params: cnn_nits_sample(params, nits_model)
 input_channels = obs[0]
 model = CNN(nr_resnet=5, nr_filters=160,
                  input_channels=input_channels, nits_params=tot_params)
+# model = ACNN(nr_resnet=5, nr_filters=256,
+#                  input_channels=input_channels, nits_params=tot_params)
 model = model.to(device)
 
 model_name = 'lr_{:.5f}_nits_arch{}_constraint{}_final_constraint{}_softmax_temperature{}'.format(
-    args.lr, args.nits_arch, args.constraint, args.final_constraint, args.softmax_temp)
+    args.lr, str(args.nits_arch).replace(' ', ''), args.constraint, args.final_constraint, args.softmax_temp)
 
 print('model_name:', model_name)
 
@@ -137,7 +139,7 @@ def sample(model):
         data = data.to(device)
         for i in range(obs[1]):
             for j in range(obs[2]):
-                out   = model(data, sample=True)
+                out   = model(data)
                 out_sample = sample_op(out)
                 data[:, :, i, j] = out_sample.data[:, :, i, j]
         return data
@@ -205,4 +207,11 @@ for epoch in range(args.max_epochs):
         np.min(test_losses),
         optimizer.param_groups[0]['lr']
     ))
+    
+    if (epoch + 1) % args.save_interval == 0:
+        print('sampling...')
+        sample_t = sample(model)
+        sample_t = rescaling_inv(sample_t)
+        utils.save_image(sample_t,'/data/image_model/images/{}_{}.png'.format(model_name, epoch),
+                nrow=5, padding=0)
 
