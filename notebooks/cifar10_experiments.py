@@ -27,7 +27,7 @@ parser.add_argument('-i', '--data_dir', type=str, default='data/')
 parser.add_argument('-o', '--save_dir', type=str, default='models/')
 parser.add_argument('-d', '--dataset', type=str, default='cifar')
 parser.add_argument('-p', '--print_every', type=int, default=50)
-parser.add_argument('-t', '--save_interval', type=int, default=10)
+parser.add_argument('-t', '--save_interval', type=int, default=1)
 parser.add_argument('-r', '--load_params', type=str, default=None)
 
 # cnn weight model
@@ -46,13 +46,14 @@ parser.add_argument('-c', '--constraint', type=str, default='neg_exp',
                     help='Constraint type of NITS')
 parser.add_argument('-fc', '--final_constraint', type=str, default='softmax',
                     help='Final constraint of NITS')
-parser.add_argument('-st', '--softmax_temp', type=bool, default=True,
+parser.add_argument('-st', '--softmax_temp', type=bool, default=False,
                     help='Use of softmax temperature')
 parser.add_argument('-ds', '--discretized', type=bool, default=False,
                     help='Discretized NITS')
-parser.add_argument('-at', '--attention', type=bool, default=False,
-                    help='Discretized NITS')
-
+parser.add_argument('-at', '--attention', type=str, default='none',
+                    help='Attention-based NITS')
+parser.add_argument('-ni', '--normalize_inverse', type=str, default=True,
+                    help='apply the normalization')
 
 args = parser.parse_args()
 
@@ -99,38 +100,44 @@ if 'mnist' in args.dataset:
     nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-5,
                       A_constraint=args.constraint, arch=arch,
                       final_layer_constraint=args.final_constraint,
-                      softmax_temperature=True).to(device)
+                      softmax_temperature=args.softmax_temp).to(device)
 elif 'cifar' in args.dataset:
     arch = [1] + args.nits_arch
     nits_model = ConditionalNITS(d=3, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-3,
                                  A_constraint=args.constraint, arch=arch, autoregressive=True,
-                                 pixelrnn=True, normalize_inverse=True,
+                                 pixelrnn=True, normalize_inverse=args.normalize_inverse,
                                  final_layer_constraint=args.final_constraint,
-                                 softmax_temperature=True).to(device)
+                                 softmax_temperature=args.softmax_temp).to(device)
 elif 'bsds300' in args.dataset:
     arch = [1] + args.nits_arch
     nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-5,
-                      A_constraint=args.constraint, arch=arch,
+                      A_constraint=args.constraint, arch=arch, normalize_inverse=args.normalize_inverse,
                       final_layer_constraint=args.final_constraint,
-                      softmax_temperature=True).to(device)
+                      softmax_temperature=args.softmax_temp).to(device)
 
 tot_params = nits_model.tot_params
 loss_op = lambda real, params: cnn_nits_loss(real, params, nits_model, discretized=args.discretized)
 sample_op = lambda params: cnn_nits_sample(params, nits_model)
 
 input_channels = obs[0]
-if args.attention:
+if args.attention == 'snail':
     model = ACNN(nr_resnet=5, nr_filters=256,
-                 input_channels=input_channels, nits_params=tot_params)
-else:
+                 input_channels=input_channels, nits_params=tot_params, n_layers=12)
+elif args.attention == 'full':
+    model = FACNN(nr_resnet=5, nr_filters=256,
+                 input_channels=input_channels, nits_params=tot_params, half_att=True)
+elif args.attention == 'none':
     model = CNN(nr_resnet=5, nr_filters=160,
                  input_channels=input_channels, nits_params=tot_params)
 
 model = model.to(device)
 
-model_name = 'lr_{:.5f}_nits_arch{}_constraint{}_final_constraint{}_softmax_temperature{}_attention{}'.format(
-    args.lr, str(args.nits_arch).replace(' ', ''), args.constraint, args.final_constraint, 
-    args.softmax_temp, args.attention)
+# model_name = 'lr_{:.5f}_nits_arch{}_constraint{}_final_constraint{}_softmax_temperature{}_attention{}'.format(
+#     args.lr, str(args.nits_arch).replace(' ', ''), args.constraint, args.final_constraint, 
+#     args.softmax_temp, args.attention)
+model_name = 'normalize_inverse{}_nits_arch{}_discretized{}_softmax_temperature{}_attention{}'.format(
+    args.normalize_inverse, str(args.nits_arch).replace(' ', '').replace(',', '_')[1:-1], 
+    args.discretized, args.softmax_temp, args.attention)
 
 print('model_name:', model_name)
 

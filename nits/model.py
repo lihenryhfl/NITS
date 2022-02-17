@@ -3,11 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-
 class MonotonicInverse(torch.autograd.Function):
     @staticmethod
     def forward(ctx, self, input, params, given_x, x_unrounded):
@@ -252,7 +247,12 @@ class NITSPrimitive(nn.Module):
 
         for i, (A, pre_activation, nonlinearity, residual) in enumerate(zip(As, pre_activations, nonlinearities, residuals)):
             grad = self.fc_gradient(grad, pre_activation, A, activation=nonlinearity, residual=residual)
-
+        
+        pre_activations.reverse()
+        As.reverse()
+        nonlinearities.reverse()
+        residuals.reverse()
+        
         if self.pixelrnn:
             return grad
         else:

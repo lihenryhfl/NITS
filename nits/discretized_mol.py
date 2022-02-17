@@ -160,6 +160,13 @@ def discretized_mix_logistic_loss(x, l, bad_loss=False):
     else:
         log_probs        = torch.sum(log_probs, dim=3) + log_prob_from_logits(logit_probs)
         return -torch.sum(log_sum_exp(log_probs))
+    
+def to_one_hot(tensor, n, fill_with=1.):
+    # we perform one hot encore with respect to the last axis
+    one_hot = torch.FloatTensor(tensor.size() + (n,)).zero_()
+    one_hot = one_hot.to(tensor.device)
+    one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
+    return Variable(one_hot)
 
 def sample_from_discretized_mix_logistic(l, nr_mix):
     # Pytorch ordering
