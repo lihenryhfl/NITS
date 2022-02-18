@@ -538,3 +538,33 @@ class ConditionalNITS(nn.Module):
             
         return self.icdf(z, params)
 
+
+if __name__ == "__main__":
+    print("Beginning gradient unit test.")
+    n = 1000
+    for arch in [[1, 10, 1], [1, 10, 10, 1]]:
+        model = NITSPrimitive(arch=arch)
+        params = torch.randn((n, model.n_params))
+        x = torch.randn((n, 1))
+
+        out1 = model.backward_(x, params).reshape(-1)
+
+        func = lambda x_: model.forward_(x_, params)
+        out2 = torch.autograd.functional.jacobian(func, x, vectorize=True)[:,0,:,0].diagonal()
+        assert((out1 - out2).norm() < 1e-5)
+        
+    d = 3
+    for pixelrnn in [True, False]:
+        for base_arch in [[10, 1], [10, 10, 1]]:
+            arch = [1] + base_arch if pixelrnn else [d] + base_arch
+            model = ConditionalNITS(d=d, arch=arch, pixelrnn=pixelrnn)
+            params = torch.randn((n, model.tot_params))
+            x = torch.randn((n, d))
+
+            out1 = model.backward_(x, params)
+
+            func = lambda x_: model.forward_(x_, params)
+            out2 = torch.autograd.functional.jacobian(func, x, vectorize=True).permute(0,2,1,3).diagonal().diagonal()
+            assert((out1 - out2).norm() < 1e-5)
+            
+    print("Gradient unit test complete. All tests passed!")
