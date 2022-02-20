@@ -11,7 +11,7 @@ def ll_to_bpd(ll, dataset='cifar', bits=8):
         n_pixels = (32 ** 2) * 3
     elif dataset == 'mnist':
         n_pixels = (28 ** 2)
-        
+
     bpd = -((ll / n_pixels) - np.log(2 ** (bits - 1))) / np.log(2)
     return bpd
 
@@ -36,11 +36,11 @@ def cnn_nits_loss(x, params, nits_model, eps=1e-7, discretized=False):
     else:
         cdf = pre_cdf
         pdf = pre_pdf
-    
+
     if discretized:
         x_plus = (x * 127.5 + .5).round() / 127.5
         x_min = (x * 127.5 - .5).round() / 127.5
-        
+
         cdf_plus = cdf(x_plus, params).clamp(max=1-eps, min=eps)
         cdf_min = cdf(x_min, params).clamp(max=1-eps, min=eps)
 
@@ -48,7 +48,7 @@ def cnn_nits_loss(x, params, nits_model, eps=1e-7, discretized=False):
         log_cdf_plus = (cdf_plus).log()
         log_one_minus_cdf_min = (1 - cdf_min).log()
         log_pdf_mid = (pdf(x, params) + eps).log()
-    
+
         inner_inner_cond = (cdf_delta > 1e-5).float()
         inner_inner_out  = inner_inner_cond * torch.clamp(cdf_delta, min=1e-12).log() + (1. - inner_inner_cond) * (log_pdf_mid - np.log(127.5))
         inner_cond       = (x > 0.999).float()
@@ -56,6 +56,8 @@ def cnn_nits_loss(x, params, nits_model, eps=1e-7, discretized=False):
         cond             = (x < -0.999).float()
         log_probs        = cond * log_cdf_plus + (1. - cond) * inner_out
     else:
+        # add dequantization noise:
+        x = x + (torch.rand(x.shape, device=x.device) - 0.5) / 127.5
         log_probs = (pdf(x, params) + eps).log()
 
     return -log_probs.sum()
@@ -108,46 +110,46 @@ class AttentionBlock(nn.Module):
         self.nin_q = NetworkInNetwork(x_dim * 2 + num_filters, self.K)
         self.nin_v = NetworkInNetwork(x_dim * 3 + num_filters, self.V)
         self.grn_out = GatedResNet(num_filters, NetworkInNetwork, skip_connection=0.5)
-    
+
     def apply_causal_mask(self, x):
         return torch.tril(x, diagonal=-1)
-    
+
     def causal_softmax(self, x, dim=-1, eps=1e-7):
         x = self.apply_causal_mask(x)
         x = x.softmax(dim=dim)
         x = self.apply_causal_mask(x)
-        
+
         # renormalize
         x = x / (x.sum(dim=dim).unsqueeze(dim) + eps)
-        
+
         return x
-        
+
     def forward(self, x, ul, b):
         n, c, h, w = x.shape
-        
+
         ul_b = torch.cat([ul, b], axis=1)
         x_ul_b = torch.cat([x, ul_b], axis=1)
-                        
+
         # compute attention -- presoftmax[:,i,j] = <queries[:,:,i], keys[:,:,j]>
         keys = self.nin_k(self.grn_k(x_ul_b)).reshape(n, self.K, h * w)
         queries = self.nin_q(self.grn_q(ul_b)).reshape(n, self.K, h * w)
         values = self.nin_v(self.grn_v(x_ul_b)).reshape(n, self.V, h * w)
         presoftmax = torch.einsum('nji,njk->nki', keys, queries)
-        
+
         # apply causal mask and softmax
         att_weights = self.causal_softmax(presoftmax)
-                
+
         # apply attention
         att_values = torch.einsum('nij,nkj->nki', att_weights, values)
-        
+
         # reshape
         att_values = att_values.reshape(n, self.V, h, w)
-        
+
         # add back ul
         result = self.grn_out(ul, a=att_values)
-        
+
         return result
-    
+
 def causal_shift(x):
     n, c, h, w = x.shape
     x = x.reshape(n, c, h * w)
@@ -167,11 +169,11 @@ def get_background(xs, device):
     background = torch.cat([v_pattern, h_pattern], axis=1)
 
     return background
-        
+
 class ACNN(nn.Module):
     def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200, input_channels=3, n_layers=3):
         super(ACNN, self).__init__()
-        
+
         self.resnet_nonlinearity = concat_elu
 
         self.nr_filters = nr_filters
@@ -182,7 +184,7 @@ class ACNN(nn.Module):
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
         self.layers = nn.ModuleList([ACNNLayer(nr_resnet, nr_filters,
                                                 self.resnet_nonlinearity) for _ in range(self.n_layers)])
-        
+
         self.att_layers = nn.ModuleList([AttentionBlock(input_channels, nr_filters) for _ in range(self.n_layers)])
 
         self.ul_init = nn.ModuleList([DownShiftedConv2d(input_channels + 1, nr_filters,
@@ -191,19 +193,19 @@ class ACNN(nn.Module):
                                             filter_size=(2,1), shift_output_right=True)])
 
         self.nin_out = NetworkInNetwork(nr_filters, nits_params)
-        
-    
+
+
     def forward(self, x, sample=False):
         if not hasattr(self, 'init_padding') or len(self.init_padding) != len(x):
             xs = [int(y) for y in x.size()]
             padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
             self.init_padding = padding.to(x.device)
-        
+
         background = get_background(x.shape, x.device)
         x_pad = torch.cat((x, self.init_padding), 1)
         x_causal = causal_shift(x)
         ul = self.ul_init[0](x_pad) + self.ul_init[1](x_pad)
-        
+
         for i in range(self.n_layers):
             ul = self.layers[i](ul)
             ul = self.att_layers[i](x_causal, ul, background)
@@ -211,7 +213,7 @@ class ACNN(nn.Module):
         x_out = self.nin_out(F.elu(ul))
 
         return x_out
-    
+
 class ACNNLayer(nn.Module):
     def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity):
         super(ACNNLayer, self).__init__()
@@ -225,7 +227,7 @@ class ACNNLayer(nn.Module):
             ul = self.ul_stream[i](ul)
 
         return ul
-    
+
 class FACNN(nn.Module):
     def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200, input_channels=3, half_att=True):
         super(FACNN, self).__init__()
@@ -243,7 +245,7 @@ class FACNN(nn.Module):
 
         self.up_layers   = nn.ModuleList([CNNLayerUp(nr_resnet, nr_filters,
                                                 self.resnet_nonlinearity) for _ in range(3)])
-        
+
         self.att_ul_layers = nn.ModuleList([AttentionBlock(input_channels, nr_filters)
                                               for _ in range(6)])
         if not half_att:
@@ -285,12 +287,12 @@ class FACNN(nn.Module):
         ul_list = [self.ul_init[0](x_pad) + self.ul_init[1](x_pad)]
         x_list = [x_causal]
         b_list = [get_background(x.shape, x.device)]
-        
+
         for i in range(3):
             u_out, ul_out = self.up_layers[i](u_list[-1], ul_list[-1])
             u_list  += u_out
             ul_list += ul_out
-            
+
             # TODO: is this the best way to update ul?
             u, ul = u_list[-1], ul_list[-1]
             ul = self.att_ul_layers[i](x_list[-1], ul, b_list[-1])
@@ -305,10 +307,10 @@ class FACNN(nn.Module):
 
         u  = u_list.pop()
         ul = ul_list.pop()
-        
+
         for i in range(3):
             u, ul = self.down_layers[i](u, ul, u_list, ul_list)
-            
+
             x_, b_ = x_list.pop(), b_list.pop()
             ul = self.att_ul_layers[i + 3](x_, ul, b_)
             if not self.half_att:
@@ -323,7 +325,7 @@ class FACNN(nn.Module):
         assert len(u_list) == len(ul_list) == 0, pdb.set_trace()
 
         return x_out
-    
+
 def concat_elu(x):
     axis = len(x.size()) - 3
     return F.elu(torch.cat([x, -x], dim=axis))
@@ -423,16 +425,16 @@ class ChannelLinear(nn.Module):
         sqrt_k = np.sqrt(k)
         self.weight = torch.rand(size=(dim_out, dim_in)) * 2 * sqrt_k - sqrt_k
         self.bias = torch.rand(size=(dim_out,)) * 2 * sqrt_k - sqrt_k
-        
+
         self.weight, self.bias = nn.Parameter(self.weight), nn.Parameter(self.bias)
-        
+
     def forward(self, x):
         assert len(x.shape) == 4
         xs = [int(k) for k in x.shape]
         assert xs[1] == self.dim_in, 'xs[1]: {}, self.dim_in: {}'.format(xs[1], self.dim_in)
         x = x.reshape(xs[0], xs[1], 1, xs[2], xs[3])
         y = torch.einsum('ij,njkml->nikml', self.weight, x) + self.bias.reshape(-1, self.dim_out, 1, 1, 1)
-                
+
         return y[:,:,0,:,:]
 
 class NetworkInNetwork(nn.Module):
@@ -597,4 +599,4 @@ class CNNLayerDown(nn.Module):
             ul = self.ul_stream[i](ul, a=torch.cat((u, ul_list.pop()), 1))
 
         return u, ul
-    
+

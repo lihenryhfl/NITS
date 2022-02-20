@@ -27,13 +27,13 @@ parser.add_argument('-i', '--data_dir', type=str, default='data/')
 parser.add_argument('-o', '--save_dir', type=str, default='models/')
 parser.add_argument('-d', '--dataset', type=str, default='cifar')
 parser.add_argument('-p', '--print_every', type=int, default=50)
-parser.add_argument('-t', '--save_interval', type=int, default=1)
+parser.add_argument('-t', '--save_interval', type=int, default=2)
 parser.add_argument('-r', '--load_params', type=str, default=None)
 
 # cnn weight model
 parser.add_argument('-l', '--lr', type=float, default=2e-4)
 parser.add_argument('-e', '--lr_decay', type=float, default=(1 - 5e-6))
-parser.add_argument('-b', '--batch_size', type=int, default=16)
+parser.add_argument('-b', '--batch_size', type=int, default=26)
 parser.add_argument('-x', '--max_epochs', type=int, default=5000)
 parser.add_argument('-s', '--seed', type=int, default=1)
 
@@ -97,20 +97,20 @@ elif 'bsds300' in args.dataset :
 # INITIALIZE NITS MODEL
 if 'mnist' in args.dataset:
     arch = [1] + args.nits_arch
-    nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-5,
+    nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-7,
                       A_constraint=args.constraint, arch=arch,
                       final_layer_constraint=args.final_constraint,
                       softmax_temperature=args.softmax_temp).to(device)
 elif 'cifar' in args.dataset:
     arch = [1] + args.nits_arch
-    nits_model = ConditionalNITS(d=3, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-3,
+    nits_model = ConditionalNITS(d=3, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-7,
                                  A_constraint=args.constraint, arch=arch, autoregressive=True,
                                  pixelrnn=True, normalize_inverse=args.normalize_inverse,
                                  final_layer_constraint=args.final_constraint,
                                  softmax_temperature=args.softmax_temp).to(device)
 elif 'bsds300' in args.dataset:
     arch = [1] + args.nits_arch
-    nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-5,
+    nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-7,
                       A_constraint=args.constraint, arch=arch, normalize_inverse=args.normalize_inverse,
                       final_layer_constraint=args.final_constraint,
                       softmax_temperature=args.softmax_temp).to(device)
@@ -133,10 +133,10 @@ elif args.attention == 'none':
 model = model.to(device)
 
 # model_name = 'lr_{:.5f}_nits_arch{}_constraint{}_final_constraint{}_softmax_temperature{}_attention{}'.format(
-#     args.lr, str(args.nits_arch).replace(' ', ''), args.constraint, args.final_constraint, 
+#     args.lr, str(args.nits_arch).replace(' ', ''), args.constraint, args.final_constraint,
 #     args.softmax_temp, args.attention)
 model_name = 'normalize_inverse{}_nits_arch{}_discretized{}_softmax_temperature{}_attention{}'.format(
-    args.normalize_inverse, str(args.nits_arch).replace(' ', '').replace(',', '_')[1:-1], 
+    args.normalize_inverse, str(args.nits_arch).replace(' ', '').replace(',', '_')[1:-1],
     args.discretized, args.softmax_temp, args.attention)
 
 print('model_name:', model_name)
@@ -215,12 +215,13 @@ for epoch in range(args.max_epochs):
         test_loss = ll_to_bpd(-test_loss, dataset=args.dataset)
 
     test_losses.append(test_loss)
-    print('test loss : {:4f}, min test loss : {:4f}, lr : {:4e}'.format(
+    print('name : {}, test loss : {:4f}, min test loss : {:4f}, lr : {:4e}'.format(
+        model_name,
         test_losses[-1],
         np.min(test_losses),
         optimizer.param_groups[0]['lr']
     ))
-    
+
     if (epoch + 1) % args.save_interval == 0:
         print('sampling...')
         sample_t = sample(model)

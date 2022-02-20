@@ -25,7 +25,7 @@ class NITSPrimitive(nn.Module):
                  final_layer_constraint='exp', non_conditional_dim=0,
                  add_residual_connections=False, pixelrnn=False,
                  softmax_temperature=True, normalize_inverse=True,
-                 inverse=False):
+                 inverse=False, bisection_eps=1e-4):
         super(NITSPrimitive, self).__init__()
         self.arch = arch
         self.monotonic_const = monotonic_const
@@ -37,10 +37,11 @@ class NITSPrimitive(nn.Module):
         self.pixelrnn = pixelrnn
         self.softmax_temperature = softmax_temperature
         self.normalize_inverse = normalize_inverse
+        self.bisection_eps = bisection_eps
 
         # count parameters
         self.n_params = 0
-        
+
         if pixelrnn:
             assert arch[0] == 1
             self.n_params += 3 * arch[1]
@@ -49,10 +50,10 @@ class NITSPrimitive(nn.Module):
             self.n_params += (a1 * a2)
             if i < self.last_layer or final_layer_constraint != 'softmax':
                 self.n_params += a2
-                
+
         if self.softmax_temperature:
             self.n_params += 1 # softmax temperature
-            
+
         self.inverse = inverse
 
         # set start and end tensors
@@ -64,7 +65,7 @@ class NITSPrimitive(nn.Module):
 
     def start_(self, x):
         start_val = 0. if self.inverse else self.start_val
-        
+
         if x is None:
             assert self.d == 1
             start = torch.ones((1, 1), device=self.start_val.device) * start_val
@@ -76,7 +77,7 @@ class NITSPrimitive(nn.Module):
 
     def end_(self, x):
         end_val = 1. if self.inverse else self.end_val
-        
+
         if x is None:
             assert self.d == 1
             end = torch.ones((1, 1), device=self.start_val.device) * end_val
@@ -123,7 +124,7 @@ class NITSPrimitive(nn.Module):
         As = []
         bs = []
         residuals = []
-        
+
         if self.pixelrnn:
             cur_idx = 3 * self.arch[1]
             linear_weights = params[:,:cur_idx].reshape(-1, 3, self.arch[1]).tanh()
@@ -161,10 +162,10 @@ class NITSPrimitive(nn.Module):
                     x = x + b
                 pre_activations.append(x)
                 nonlinearities.append(self.activation)
-                
+
                 # apply activation
                 x = self.apply_act(x)
-                
+
                 # add residual connection if applicable
                 if i > 0 and self.add_residual_connections and x.shape[1] == pre_activations[-2].shape[1]:
                     assert prev_x.shape == x.shape
@@ -176,9 +177,9 @@ class NITSPrimitive(nn.Module):
                 pre_activations.append(x)
                 nonlinearities.append('linear')
                 residuals.append(False)
-                
+
             prev_x = x
-        
+
         x = x + self.monotonic_const * monotonic_x
 
         if return_intermediaries:
@@ -193,14 +194,14 @@ class NITSPrimitive(nn.Module):
 
         # compute pre-scaled cdf, then scale
         y, pre_activations, As, bs, nonlinearities, residuals = self.forward_(x, params, x_unrounded=x_unrounded, return_intermediaries=True)
-        
+
         if self.inverse:
             scale = (self.end_val - self.start_val) / (end - start)
             bias = self.start_val - start
         else:
             scale = 1 / (end - start)
             bias = -start
-        
+
         y_scaled = (y + bias) * scale
 
         # accounting
@@ -213,7 +214,7 @@ class NITSPrimitive(nn.Module):
             return y_scaled, pre_activations, As, bs, nonlinearities, residuals
         else:
             return y_scaled
-        
+
     def cdf(self, x, params, x_unrounded=None, return_intermediaries=False):
         if self.inverse:
             assert not return_intermediaries, "Error: If inverse == True, return_intermediaries must be False!"
@@ -230,9 +231,9 @@ class NITSPrimitive(nn.Module):
         elif activation == 'sigmoid':
             sig_act = pre_activation.sigmoid()
             grad = grad * sig_act * (1 - sig_act)
-            
+
         result = torch.einsum('ni,nij->nj', grad, A)
-        
+
         if residual:
             result = result + orig_grad
 
@@ -247,12 +248,12 @@ class NITSPrimitive(nn.Module):
 
         for i, (A, pre_activation, nonlinearity, residual) in enumerate(zip(As, pre_activations, nonlinearities, residuals)):
             grad = self.fc_gradient(grad, pre_activation, A, activation=nonlinearity, residual=residual)
-        
+
         pre_activations.reverse()
         As.reverse()
         nonlinearities.reverse()
         residuals.reverse()
-        
+
         if self.pixelrnn:
             return grad
         else:
@@ -264,7 +265,7 @@ class NITSPrimitive(nn.Module):
 
         grad = self.backward_primitive_(y, pre_activations, As, bs, nonlinearities, residuals)
         grad = grad + self.monotonic_const
-        
+
         if return_intermediaries:
             return grad, pre_activations, As, bs, nonlinearities, residuals
         else:
@@ -274,8 +275,8 @@ class NITSPrimitive(nn.Module):
         y, pre_activations, As, bs, nonlinearities, residuals = self.cdf(x, params, x_unrounded=x_unrounded, return_intermediaries=True)
 
         grad = self.backward_primitive_(y, pre_activations, As, bs, nonlinearities, residuals)
-        grad = grad + self.monotonic_const * As[0].reshape(-1, 1)
-        
+        grad = grad + self.monotonic_const * As[-1].reshape(-1, 1)
+
         if return_intermediaries:
             return grad, pre_activations, As, bs, nonlinearities, residuals
         else:
@@ -293,12 +294,12 @@ class NITSPrimitive(nn.Module):
         else:
             return MonotonicInverse.apply(self, z, params, given_x, None)
 
-    def bisection_search(self, y, params, given_x, x_unrounded, eps=1e-4):
+    def bisection_search(self, y, params, given_x, x_unrounded):
         y = y.clone()[:,self.non_conditional_dim].unsqueeze(-1)
         low = self.start_(given_x)
         high = self.end_(given_x)
 
-        while ((high - low) > eps).any():
+        while ((high - low) > self.bisection_eps).any():
             x_hat = (high + low) / 2
             if self.normalize_inverse:
                 y_hat = self.normalized_forward(x_hat, params, x_unrounded=x_unrounded)
@@ -427,9 +428,9 @@ class ConditionalNITS(nn.Module):
     def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax',
                  autoregressive=True, pixelrnn=False, normalize_inverse=True,
-                 add_residual_connections=False, softmax_temperature=True):
+                 add_residual_connections=False, softmax_temperature=True, bisection_eps=1e-4):
         super(ConditionalNITS, self).__init__()
-        
+
         self.d = d
         self.final_layer_constraint = final_layer_constraint
         self.autoregressive = autoregressive
@@ -437,10 +438,11 @@ class ConditionalNITS(nn.Module):
 
         self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
         self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
-        
+
         self.pixelrnn = pixelrnn
         self.normalize_inverse = normalize_inverse
         self.softmax_temperature = softmax_temperature
+        self.bisection_eps = bisection_eps
 
         assert arch[0] == d or pixelrnn
         self.nits_list = torch.nn.ModuleList()
@@ -452,9 +454,10 @@ class ConditionalNITS(nn.Module):
                                   non_conditional_dim=i, pixelrnn=pixelrnn,
                                   normalize_inverse=normalize_inverse,
                                   add_residual_connections=add_residual_connections,
-                                  softmax_temperature=softmax_temperature)
+                                  softmax_temperature=softmax_temperature,
+                                  bisection_eps=bisection_eps)
             self.nits_list.append(model)
-            
+
         if pixelrnn:
             self.tot_params = sum([m.n_params for m in self.nits_list]) - 20
             self.n_params = self.nits_list[0].n_params - 10
@@ -467,7 +470,7 @@ class ConditionalNITS(nn.Module):
             x = x.clone()
             x = torch.cat([x[:,:i+1], torch.zeros_like(x)[:,i+1:]], axis=1)
         return x
-    
+
     def get_params(self, params, i):
         if self.pixelrnn:
             start_idx, end_idx = 10 + i * self.n_params, 10 + (i + 1) * self.n_params
@@ -503,7 +506,7 @@ class ConditionalNITS(nn.Module):
                 results.append(result.reshape((n, -1)))
 
         results = torch.cat(results, axis=1)
-        
+
         if return_intermediaries:
             return results, pre_activations, As, bs, nonlinearities, residuals
         else:
@@ -533,9 +536,9 @@ class ConditionalNITS(nn.Module):
             n = len(params)
         else:
             raise NotImplementedError("Either n == len(params) or one of n, len(params) must be 1. ")
-            
+
         z = torch.rand((n, self.d)).to(params.device)
-            
+
         return self.icdf(z, params)
 
 
@@ -552,7 +555,7 @@ if __name__ == "__main__":
         func = lambda x_: model.forward_(x_, params)
         out2 = torch.autograd.functional.jacobian(func, x, vectorize=True)[:,0,:,0].diagonal()
         assert((out1 - out2).norm() < 1e-5)
-        
+
     d = 3
     for pixelrnn in [True, False]:
         for base_arch in [[10, 1], [10, 10, 1]]:
@@ -566,5 +569,5 @@ if __name__ == "__main__":
             func = lambda x_: model.forward_(x_, params)
             out2 = torch.autograd.functional.jacobian(func, x, vectorize=True).permute(0,2,1,3).diagonal().diagonal()
             assert((out1 - out2).norm() < 1e-5)
-            
+
     print("Gradient unit test complete. All tests passed!")
