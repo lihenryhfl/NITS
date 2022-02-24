@@ -7,13 +7,22 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim import lr_scheduler
 from torchvision import datasets, transforms, utils
-from utils import *
-from model import *
 from PIL import Image
 from nits.model import ConditionalNITS
-from nits.cnn_model import cnn_nits_loss, cnn_nits_sample, ll_to_bpd
+from nits.cnn_model import *
 from nits.discretized_mol import discretized_mix_logistic_loss as unstable_pixelcnn_loss
 from nits.discretized_mol import sample_from_discretized_mix_logistic as unstable_pixelcnn_sample
+
+def list_str_to_list(s):
+    print(s)
+    assert s[0] == '[' and s[-1] == ']'
+    s = s[1:-1]
+    s = s.replace(' ', '')
+    s = s.split(',')
+
+    s = [int(x) for x in s]
+
+    return s
 
 parser = argparse.ArgumentParser()
 # data I/O
@@ -52,7 +61,7 @@ parser.add_argument('-s', '--seed', type=int, default=1,
                     help='Random seed to use')
 parser.add_argument('-ds', '--discretized', type=bool, default=False,
                     help='Discretized model')
-parser.add_argument('-ns', '--nits', type=bool, default=False,
+parser.add_argument('-ns', '--nits', type=bool, default=True,
                     help='nits model')
 parser.add_argument('-at', '--attention', type=str, default='',
                     help='Attention-based NITS')
@@ -64,6 +73,8 @@ parser.add_argument('-be', '--bisection_eps', type=int, default=6,
                     help='epsilon accuracy for bisection search')
 parser.add_argument('-dq', '--dequantize', type=bool, default=False,
                     help='do we dequantize the pixels? performs uniform dequantization')
+parser.add_argument('-a', '--nits_arch', type=list_str_to_list, default='[10,1]',
+                   help='Architecture of NITS PNN')
 args = parser.parse_args()
 
 if args.gpu:
@@ -78,10 +89,13 @@ np.random.seed(args.seed)
 if args.extra_string:
     args.extra_string = '_' + args.extra_string
 
-model_name = 'nits{}_discretized{}_dequantized{}_attention{}_bseps{}{}'.format(args.nits, args.discretized, args.dequantized,
-                                                                                                        args.attention,
-                                                                                                        args.bisection_eps,
-                                                                                                        args.extra_string)
+arch_string = str(args.nits_arch).replace(' ', '').replace(',', '_')[1:-1]
+
+model_name = 'nits{}_discretized{}_dequantize{}_attention{}_bseps{}_arch{}{}'.format(args.nits, args.discretized, args.dequantize,
+                                                                                     args.attention,
+                                                                                     args.bisection_eps,
+                                                                                     arch_string,
+                                                                                     args.extra_string)
 print('model_name:', model_name)
 assert not os.path.exists(os.path.join('runs', model_name)), '{} already exists!'.format(model_name)
 
@@ -154,15 +168,15 @@ else:
 if args.attention == 'full':
     print("USING FACNN")
     model = FACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, tot_params=n_params)
+                input_channels=input_channels, n_params=n_params)
 elif args.attention == 'snail':
     print("USING SNAIL")
     model = ACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, tot_params=n_params)
+                input_channels=input_channels, n_params=n_params)
 elif args.attention == '':
     print("USING PixelCNN")
-    model = PixelCNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, tot_params=n_params)
+    model = CNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
+                input_channels=input_channels, n_params=n_params)
 model = model.to(device)
 
 if args.load_params:

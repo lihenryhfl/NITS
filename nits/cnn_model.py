@@ -175,14 +175,14 @@ def get_background(xs, device):
     return background
 
 class ACNN(nn.Module):
-    def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200, input_channels=3, n_layers=3):
+    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, n_layers=12):
         super(ACNN, self).__init__()
 
         self.resnet_nonlinearity = concat_elu
 
         self.nr_filters = nr_filters
         self.input_channels = input_channels
-        self.nits_params = nits_params
+        self.n_params = n_params
         self.n_layers = n_layers
 
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
@@ -196,7 +196,7 @@ class ACNN(nn.Module):
                                        DownRightShiftedConv2d(input_channels + 1, nr_filters,
                                             filter_size=(2,1), shift_output_right=True)])
 
-        self.nin_out = NetworkInNetwork(nr_filters, nits_params)
+        self.nin_out = NetworkInNetwork(nr_filters, n_params)
 
 
     def forward(self, x, sample=False):
@@ -233,14 +233,14 @@ class ACNNLayer(nn.Module):
         return ul
 
 class FACNN(nn.Module):
-    def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200, input_channels=3, half_att=True):
+    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, half_att=True):
         super(FACNN, self).__init__()
 
         self.resnet_nonlinearity = concat_elu
 
         self.nr_filters = nr_filters
         self.input_channels = input_channels
-        self.nits_params = nits_params
+        self.n_params = n_params
         self.half_att = half_att
 
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
@@ -276,7 +276,7 @@ class FACNN(nn.Module):
                                        DownRightShiftedConv2d(input_channels + 1, nr_filters,
                                             filter_size=(2,1), shift_output_right=True)])
 
-        self.nin_out = NetworkInNetwork(nr_filters, nits_params)
+        self.nin_out = NetworkInNetwork(nr_filters, n_params)
 
 
     def forward(self, x):
@@ -335,14 +335,14 @@ def concat_elu(x):
     return F.elu(torch.cat([x, -x], dim=axis))
 
 class CNN(nn.Module):
-    def __init__(self, nr_resnet=5, nr_filters=80, nits_params=200, input_channels=3):
+    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3):
         super(CNN, self).__init__()
 
         self.resnet_nonlinearity = concat_elu
 
         self.nr_filters = nr_filters
         self.input_channels = input_channels
-        self.nits_params = nits_params
+        self.n_params = n_params
 
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
         self.down_layers = nn.ModuleList([CNNLayerDown(down_nr_resnet[i], nr_filters,
@@ -371,7 +371,7 @@ class CNN(nn.Module):
                                        DownRightShiftedConv2d(input_channels + 1, nr_filters,
                                             filter_size=(2,1), shift_output_right=True)])
 
-        self.nin_out = NetworkInNetwork(nr_filters, nits_params)
+        self.nin_out = NetworkInNetwork(nr_filters, n_params)
 
 
     def forward(self, x):
