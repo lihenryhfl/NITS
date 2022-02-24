@@ -25,7 +25,7 @@ class NITSPrimitive(nn.Module):
                  final_layer_constraint='exp', non_conditional_dim=0,
                  add_residual_connections=False, pixelrnn=False,
                  softmax_temperature=True, normalize_inverse=True,
-                 inverse=False, bisection_eps=1e-4):
+                 inverse=False, bisection_eps=1e-6):
         super(NITSPrimitive, self).__init__()
         self.arch = arch
         self.monotonic_const = monotonic_const
@@ -294,12 +294,13 @@ class NITSPrimitive(nn.Module):
         else:
             return MonotonicInverse.apply(self, z, params, given_x, None)
 
-    def bisection_search(self, y, params, given_x, x_unrounded):
+    def bisection_search(self, y, params, given_x, x_unrounded, max_iters=2e3):
         y = y.clone()[:,self.non_conditional_dim].unsqueeze(-1)
         low = self.start_(given_x)
         high = self.end_(given_x)
 
-        while ((high - low) > self.bisection_eps).any():
+        n_iters = 0
+        while ((high - low) > self.bisection_eps).any() and n_iters < max_iters:
             x_hat = (high + low) / 2
             if self.normalize_inverse:
                 y_hat = self.normalized_forward(x_hat, params, x_unrounded=x_unrounded)
@@ -307,6 +308,10 @@ class NITSPrimitive(nn.Module):
                 y_hat = self.forward_(x_hat, params, x_unrounded=x_unrounded)
             low = torch.where(y_hat > y, low, x_hat)
             high = torch.where(y_hat > y, x_hat, high)
+
+            n_iters += 1
+            if n_iters > max_iters:
+                print("ERROR, n_iters, max_iters", n_iters, max_iters)
 
         result = ((high + low) / 2)
 
@@ -428,7 +433,8 @@ class ConditionalNITS(nn.Module):
     def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax',
                  autoregressive=True, pixelrnn=False, normalize_inverse=True,
-                 add_residual_connections=False, softmax_temperature=True, bisection_eps=1e-4):
+                 add_residual_connections=False, softmax_temperature=True,
+                 bisection_eps=1e-4, single_mixture=True):
         super(ConditionalNITS, self).__init__()
 
         self.d = d
@@ -443,6 +449,7 @@ class ConditionalNITS(nn.Module):
         self.normalize_inverse = normalize_inverse
         self.softmax_temperature = softmax_temperature
         self.bisection_eps = bisection_eps
+        self.single_mixture = single_mixture
 
         assert arch[0] == d or pixelrnn
         self.nits_list = torch.nn.ModuleList()
@@ -458,7 +465,7 @@ class ConditionalNITS(nn.Module):
                                   bisection_eps=bisection_eps)
             self.nits_list.append(model)
 
-        if pixelrnn:
+        if pixelrnn and self.single_mixture:
             self.tot_params = sum([m.n_params for m in self.nits_list]) - 20
             self.n_params = self.nits_list[0].n_params - 10
         else:
@@ -472,7 +479,7 @@ class ConditionalNITS(nn.Module):
         return x
 
     def get_params(self, params, i):
-        if self.pixelrnn:
+        if self.pixelrnn and self.single_mixture:
             start_idx, end_idx = 10 + i * self.n_params, 10 + (i + 1) * self.n_params
             return torch.cat([params[:,start_idx:end_idx], params[:,:10]], axis=1)
         else:

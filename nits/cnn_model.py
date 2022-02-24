@@ -15,7 +15,7 @@ def ll_to_bpd(ll, dataset='cifar', bits=8):
     bpd = -((ll / n_pixels) - np.log(2 ** (bits - 1))) / np.log(2)
     return bpd
 
-def cnn_nits_loss(x, params, nits_model, eps=1e-7, discretized=False):
+def cnn_nits_loss(x, params, nits_model, eps=1e-7, discretized=False, dequantize=False):
     x = x.permute(0, 2, 3, 1)
     params = params.permute(0, 2, 3, 1)
 
@@ -56,13 +56,14 @@ def cnn_nits_loss(x, params, nits_model, eps=1e-7, discretized=False):
         cond             = (x < -0.999).float()
         log_probs        = cond * log_cdf_plus + (1. - cond) * inner_out
     else:
-        # add dequantization noise:
-        x = x + (torch.rand(x.shape, device=x.device) - 0.5) / 127.5
+        if dequantize:
+            # add dequantization noise:
+            x = x + (torch.rand(x.shape, device=x.device) - 0.5) / 127.5
         log_probs = (pdf(x, params) + eps).log()
 
     return -log_probs.sum()
 
-def cnn_nits_sample(params, nits_model):
+def cnn_nits_sample(params, nits_model, quantize=False):
     params = params.permute(0, 2, 3, 1)
     batch_size, height, width, params_per_pixel = params.shape
 
@@ -70,6 +71,9 @@ def cnn_nits_sample(params, nits_model):
 
     imgs = nits_model.sample(1, params.reshape(-1, nits_model.tot_params)).clamp(min=-1., max=1.)
     imgs = imgs.reshape(batch_size, height, width, nits_model.d).permute(0, 3, 1, 2)
+
+    if quantize:
+        imgs = ((imgs + 1) * 127.5).round() / 127.5 - 1
 
     return imgs
 
