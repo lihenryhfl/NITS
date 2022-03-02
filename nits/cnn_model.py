@@ -6,6 +6,19 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn.utils import weight_norm as wn
 
+def load_part_of_model(model, path):
+    params = torch.load(path)
+    added = 0
+    for name, param in params.items():
+        if name in model.state_dict().keys():
+            try :
+                model.state_dict()[name].copy_(param)
+                added += 1
+            except Exception as e:
+                print(e)
+                pass
+    print('added %s of params:' % (added / float(len(model.state_dict().keys()))))
+
 def ll_to_bpd(ll, dataset='cifar', bits=8):
     if dataset == 'cifar':
         n_pixels = (32 ** 2) * 3

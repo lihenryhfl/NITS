@@ -38,8 +38,10 @@ parser.add_argument('-p', '--print_every', type=int, default=50,
                     help='how many iterations between print statements')
 parser.add_argument('-t', '--save_interval', type=int, default=2,
                     help='Every how many epochs to write checkpoint/samples?')
-parser.add_argument('-r', '--load_params', type=str, default=None,
-                    help='Restore training from previous model checkpoint?')
+# parser.add_argument('-r', '--load_params', type=str, default=None,
+                    # help='Restore training from previous model checkpoint?')
+parser.add_argument('-r', '--load_epoch', type=int, default=-1,
+                    help='Restore training from previous model checkpoint? If so, which epoch?')
 # model
 parser.add_argument('-q', '--nr_resnet', type=int, default=5,
                     help='Number of residual blocks per stage of the model')
@@ -179,8 +181,10 @@ elif args.attention == '':
                 input_channels=input_channels, n_params=n_params)
 model = model.to(device)
 
-if args.load_params:
-    load_part_of_model(model, args.load_params)
+if args.load_epoch != -1:
+    load_path = '/data/image_model/models/{}_{}.pth'.format(model_name, args.load_epoch)
+    print("loading parameters from path =", load_path)
+    load_part_of_model(model, load_path)
     # model.load_state_dict(torch.load(args.load_params))
     print('model parameters loaded')
 
@@ -257,9 +261,11 @@ for epoch in range(args.max_epochs):
     print('model_name: {},  test loss: {:.5f}, best loss: {:.5f}'.format(model_name, test_loss, best_loss))
 
     if (epoch + 1) % args.save_interval == 0:
-        torch.save(model.state_dict(), '/data/image_model/models/{}_{}.pth'.format(model_name, epoch))
         print('sampling...')
         sample_t = sample(model)
         sample_t = rescaling_inv(sample_t)
         utils.save_image(sample_t,'/data/image_model/images/{}_{}.png'.format(model_name, epoch),
                 nrow=5, padding=0)
+
+    if (epoch + 1) % 10 == 0:
+        torch.save(model.state_dict(), '/data/image_model/models/{}_{}.pth'.format(model_name, epoch))
