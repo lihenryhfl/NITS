@@ -122,13 +122,13 @@ sample_op = lambda params: cnn_nits_sample(params, nits_model)
 input_channels = obs[0]
 if args.attention == 'snail':
     model = ACNN(nr_resnet=5, nr_filters=256,
-                 input_channels=input_channels, nits_params=tot_params, n_layers=12)
+                 input_channels=input_channels, n_params=tot_params, n_layers=12)
 elif args.attention == 'full':
     model = FACNN(nr_resnet=5, nr_filters=256,
-                 input_channels=input_channels, nits_params=tot_params, half_att=True)
+                 input_channels=input_channels, n_params=tot_params, half_att=True)
 elif args.attention == 'none':
     model = CNN(nr_resnet=5, nr_filters=160,
-                 input_channels=input_channels, nits_params=tot_params)
+                 input_channels=input_channels, n_params=tot_params)
 
 model = model.to(device)
 

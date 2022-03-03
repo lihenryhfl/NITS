@@ -20,12 +20,12 @@ class MonotonicInverse(torch.autograd.Function):
         return None, dy
 
 class NITSPrimitive(nn.Module):
-    def __init__(self, arch, start=0., end=1., A_constraint='exp',
-                 monotonic_const=1e-3, activation='sigmoid',
-                 final_layer_constraint='exp', non_conditional_dim=0,
+    def __init__(self, arch, start=0., end=1., A_constraint='neg_exp',
+                 monotonic_const=1e-6, activation='sigmoid',
+                 final_layer_constraint='softmax', non_conditional_dim=0,
                  add_residual_connections=False, pixelrnn=False,
                  softmax_temperature=True, normalize_inverse=True,
-                 inverse=False, bisection_eps=1e-6):
+                 bisection_eps=1e-6):
         super(NITSPrimitive, self).__init__()
         self.arch = arch
         self.monotonic_const = monotonic_const
@@ -54,8 +54,6 @@ class NITSPrimitive(nn.Module):
         if self.softmax_temperature:
             self.n_params += 1 # softmax temperature
 
-        self.inverse = inverse
-
         # set start and end tensors
         self.d = arch[0]
         assert non_conditional_dim < self.d or pixelrnn
@@ -64,26 +62,22 @@ class NITSPrimitive(nn.Module):
         self.register_buffer('end_val', torch.tensor(end))
 
     def start_(self, x):
-        start_val = 0. if self.inverse else self.start_val
-
         if x is None:
             assert self.d == 1
-            start = torch.ones((1, 1), device=self.start_val.device) * start_val
+            start = torch.ones((1, 1), device=self.start_val.device) * self.start_val
         else:
             start = x.clone()
-            start[:, self.non_conditional_dim] = start_val
+            start[:, self.non_conditional_dim] = self.start_val
 
         return start
 
     def end_(self, x):
-        end_val = 1. if self.inverse else self.end_val
-
         if x is None:
             assert self.d == 1
-            end = torch.ones((1, 1), device=self.start_val.device) * end_val
+            end = torch.ones((1, 1), device=self.start_val.device) * self.end_val
         else:
             end = x.clone()
-            end[:, self.non_conditional_dim] = end_val
+            end[:, self.non_conditional_dim] = self.end_val
 
         return end
 
@@ -195,12 +189,8 @@ class NITSPrimitive(nn.Module):
         # compute pre-scaled cdf, then scale
         y, pre_activations, As, bs, nonlinearities, residuals = self.forward_(x, params, x_unrounded=x_unrounded, return_intermediaries=True)
 
-        if self.inverse:
-            scale = (self.end_val - self.start_val) / (end - start)
-            bias = self.start_val - start
-        else:
-            scale = 1 / (end - start)
-            bias = -start
+        scale = 1 / (end - start)
+        bias = -start
 
         y_scaled = (y + bias) * scale
 
@@ -216,11 +206,7 @@ class NITSPrimitive(nn.Module):
             return y_scaled
 
     def cdf(self, x, params, x_unrounded=None, return_intermediaries=False):
-        if self.inverse:
-            assert not return_intermediaries, "Error: If inverse == True, return_intermediaries must be False!"
-            return NITSMonotonicInverse.apply(self, x, params, given_x, x_unrounded)
-        else:
-            return self.normalized_forward(x, params, x_unrounded, return_intermediaries)
+        return self.normalized_forward(x, params, x_unrounded, return_intermediaries)
 
     def fc_gradient(self, grad, pre_activation, A, activation, residual):
         orig_grad = grad
@@ -289,33 +275,35 @@ class NITSPrimitive(nn.Module):
         return x
 
     def icdf(self, z, params, given_x=None):
-        if self.inverse:
-            return self.normalized_forward(x, params, x_unrounded=None, return_intermediaries=False)
-        else:
-            return MonotonicInverse.apply(self, z, params, given_x, None)
+        return self.fpi(z, params, given_x, None)
 
-    def bisection_search(self, y, params, given_x, x_unrounded, max_iters=2e3):
+    def fpi(self, y, params, given_x, x_unrounded, max_iters=1e2):
         y = y.clone()[:,self.non_conditional_dim].unsqueeze(-1)
-        low = self.start_(given_x)
-        high = self.end_(given_x)
+        x_hat = self.start_(given_x)
+        
+        def f(x_hat):
+            if self.normalize_inverse:
+                return self.normalized_forward(x_hat, params, x_unrounded=x_unrounded)
+            else:
+                return self.forward_(x_hat, params, x_unrounded=x_unrounded)
+       
+        def dfdx(x_hat):
+            if self.normalize_inverse:
+                return self.pdf(x_hat, params, x_unrounded=x_unrounded)
+            else:
+                return self.backward_(x_hat, params, x_unrounded=x_unrounded)
+        
+        guess = f(x_hat)
 
         n_iters = 0
-        while ((high - low) > self.bisection_eps).any() and n_iters < max_iters:
-            x_hat = (high + low) / 2
-            if self.normalize_inverse:
-                y_hat = self.normalized_forward(x_hat, params, x_unrounded=x_unrounded)
-            else:
-                y_hat = self.forward_(x_hat, params, x_unrounded=x_unrounded)
-            low = torch.where(y_hat > y, low, x_hat)
-            high = torch.where(y_hat > y, x_hat, high)
-
+        while ((guess - y).abs() > self.bisection_eps).any() and n_iters < max_iters:
+            x_hat = x_hat - 0.5 * (guess - y) / dfdx(x_hat)
+            guess = f(x_hat)
             n_iters += 1
-            if n_iters > max_iters:
-                print("ERROR, n_iters, max_iters", n_iters, max_iters)
-
-        result = ((high + low) / 2)
-
-        return result
+            if n_iters == max_iters:
+                print("ERROR = {}, n_iters = {}, max_iters = {}".format((guess - y).abs().max(), n_iters, max_iters))
+                
+        return x_hat
 
 class NITS(NITSPrimitive):
     def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
