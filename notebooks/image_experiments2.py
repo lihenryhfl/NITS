@@ -170,28 +170,28 @@ else:
     n_params = 160
 
 # build multistep loss (if applicable)
-# def compute_loss(model, input, loss_op):
-    # loss = 0.
-    # og_input = input
-    # for i in range(args.n_steps - 1):
-        # output = model(input)
-        # loss += loss_op(og_input, output)
-        # input = sample_op(output)
-
-    # output = model(input)
-    # loss += loss_op(og_input, output)
-
-    # return loss / args.n_steps
-
-def compute_loss(model, input, loss_op):
+def compute_loss(model, input, loss_op, loss_weights=[1, 3]):
+    loss = 0.
     og_input = input
     for i in range(args.n_steps - 1):
         output = model(input)
+        loss += loss_op(og_input, output) * loss_weights[i]
         input = sample_op(output)
 
     output = model(input)
-    loss = loss_op(og_input, output)
-    return loss
+    loss += loss_op(og_input, output) * loss_weights[i + 1]
+
+    return loss / np.sum(loss_weights)
+
+# def compute_loss(model, input, loss_op):
+    # og_input = input
+    # for i in range(args.n_steps - 1):
+        # output = model(input)
+        # input = sample_op(output)
+
+    # output = model(input)
+    # loss = loss_op(og_input, output)
+    # return loss
 
 
 if args.attention == 'full':
@@ -228,11 +228,11 @@ if args.load_epoch > 0:
     print('model parameters loaded')
     model = model.to(device)
 
-    print("sampling...")
-    sample_t = sample(model)
-    sample_t = rescaling_inv(sample_t)
-    utils.save_image(sample_t,'/data/image_model/images/test.png',
-            nrow=5, padding=0)
+    # print("sampling...")
+    # sample_t = sample(model)
+    # sample_t = rescaling_inv(sample_t)
+    # utils.save_image(sample_t,'/data/image_model/images/test.png',
+            # nrow=5, padding=0)
 
 optimizer = optim.Adam(model.parameters(), lr=args.lr)
 scheduler = lr_scheduler.StepLR(optimizer, step_size=1, gamma=args.lr_decay)
@@ -242,14 +242,20 @@ best_loss = np.inf
 for epoch in range(args.load_epoch, args.max_epochs):
     model.train(True)
     train_loss = 0.
+    tot_time1 = 0.
+    tot_time2 = 0.
     time_ = time.time()
     model.train()
     for batch_idx, (input,_) in enumerate(train_loader):
         input = input.to(device)
+        time1_ = time.time()
         loss = compute_loss(model, input, loss_op)
+        tot_time1 += time.time() - time1_
         optimizer.zero_grad()
+        time2_ = time.time()
         loss.backward()
         optimizer.step()
+        tot_time2 += time.time() - time2_
         train_loss += loss.detach().cpu().numpy()
         if (batch_idx +1) % args.print_every == 0 :
             if not args.nits or args.discretized:
@@ -259,9 +265,13 @@ for epoch in range(args.load_epoch, args.max_epochs):
                 deno = args.print_every * args.batch_size
                 train_loss = train_loss / deno
                 train_loss = ll_to_bpd(-train_loss, dataset=args.dataset)
-            print('loss : {:.4f}, time : {:.4f}'.format(
-                (train_loss),
-                (time.time() - time_)))
+            print('loss : {:.4f}, time : {:.4f}, loss time : {:.4f}, backprop time : {:.4f}'.format(
+            (train_loss),
+            (time.time() - time_),
+            (tot_time1),
+            (tot_time2)))
+            tot_time1 = 0.
+            tot_time2 = 0.
             train_loss = 0.
             time_ = time.time()
 

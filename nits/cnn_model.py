@@ -6,8 +6,8 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn.utils import weight_norm as wn
 
-def load_part_of_model(model, path):
-    params = torch.load(path)
+def load_part_of_model(model, path, device=None):
+    params = torch.load(path, map_location=device)
     added = 0
     for name, param in params.items():
         if name in model.state_dict().keys():
@@ -477,6 +477,8 @@ class DownShiftedConv2d(nn.Module):
         self.conv = nn.Conv2d(num_filters_in, num_filters_out, filter_size, stride)
         self.shift_output_down = shift_output_down
         self.norm = norm
+        # arguments of zeropad2d: padding_left, padding_right, padding_top, padding_bottom
+        # therefore, for filter_size = (2, 3), this pads 1 left, 1 right, 1 above, and 0 below
         self.pad  = nn.ZeroPad2d((int((filter_size[1] - 1) / 2),
                                   int((filter_size[1] - 1) / 2),
                                   filter_size[0] - 1,
@@ -515,6 +517,8 @@ class DownRightShiftedConv2d(nn.Module):
         super(DownRightShiftedConv2d, self).__init__()
 
         assert norm in [None, 'batch_norm', 'weight_norm']
+        # arguments of zeropad2d: padding_left, padding_right, padding_top, padding_bottom
+        # therefore, for filter_size = (2, 2), this pads 1 left, 0 right, 1 above, and 0 below
         self.pad = nn.ZeroPad2d((filter_size[1] - 1, 0, filter_size[0] - 1, 0))
         self.conv = nn.Conv2d(num_filters_in, num_filters_out, filter_size, stride=stride)
         self.shift_output_right = shift_output_right

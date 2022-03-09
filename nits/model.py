@@ -62,24 +62,20 @@ class NITSPrimitive(nn.Module):
         self.register_buffer('end_val', torch.tensor(end))
 
     def start_(self, x):
-        if x is None:
-            assert self.d == 1
-            start = torch.ones((1, 1), device=self.start_val.device) * self.start_val
-        else:
-            start = x.clone()
-            start[:, self.non_conditional_dim] = self.start_val
-
-        return start
+        return self.clone_x_and_fill_conditional_dim_with(x, self.start_val)
 
     def end_(self, x):
+        return self.clone_x_and_fill_conditional_dim_with(x, self.end_val)
+
+    def clone_x_and_fill_conditional_dim_with(self, x, fill_with):
         if x is None:
             assert self.d == 1
-            end = torch.ones((1, 1), device=self.start_val.device) * self.end_val
+            output = torch.ones((1, 1), device=fill_with.device) * fill_with
         else:
-            end = x.clone()
-            end[:, self.non_conditional_dim] = self.end_val
+            output = x.clone()
+            output[:, self.non_conditional_dim] = fill_with
 
-        return end
+        return output
 
     def apply_A_constraint(self, A, constraint, params):
         if constraint == 'neg_exp':
@@ -274,35 +270,63 @@ class NITSPrimitive(nn.Module):
 
         return x
 
-    def icdf(self, z, params, given_x=None):
-        return self.fpi(z, params, given_x, None)
-
-    def fpi(self, y, params, given_x, x_unrounded, max_iters=1e2):
+    def bisection_search(self, y, params, given_x, x_unrounded, max_iters=2e3, bisection_eps=1e-4):
         y = y.clone()[:,self.non_conditional_dim].unsqueeze(-1)
-        x_hat = self.start_(given_x)
-        
+        low = self.start_(given_x)
+        high = self.end_(given_x)
+
+        n_iters = 0
+        while ((high - low) > bisection_eps).any() and n_iters < max_iters:
+            x_hat = (high + low) / 2
+            if self.normalize_inverse:
+                y_hat = self.normalized_forward(x_hat, params, x_unrounded=x_unrounded)
+            else:
+                y_hat = self.forward_(x_hat, params, x_unrounded=x_unrounded)
+            low = torch.where(y_hat > y, low, x_hat)
+            high = torch.where(y_hat > y, x_hat, high)
+
+            n_iters += 1
+            if n_iters == max_iters:
+                print("BISECTION ERROR, n_iters, max_iters", n_iters, max_iters)
+
+        result = ((high + low) / 2)
+
+        return result
+
+    def icdf(self, z, params, given_x=None):
+        return self.fpi(z, params, given_x, None)[:, self.non_conditional_dim].unsqueeze(-1)
+
+    def fpi(self, y, params, given_x, x_unrounded, max_iters=25):
+        with torch.no_grad():
+            x_hat = self.bisection_search(y, params, given_x, x_unrounded,
+                                          max_iters=500, bisection_eps=self.bisection_eps)
+        y = y.clone()[:,self.non_conditional_dim].unsqueeze(-1)
+
         def f(x_hat):
             if self.normalize_inverse:
                 return self.normalized_forward(x_hat, params, x_unrounded=x_unrounded)
             else:
                 return self.forward_(x_hat, params, x_unrounded=x_unrounded)
-       
+
         def dfdx(x_hat):
             if self.normalize_inverse:
                 return self.pdf(x_hat, params, x_unrounded=x_unrounded)
             else:
                 return self.backward_(x_hat, params, x_unrounded=x_unrounded)
-        
+
         guess = f(x_hat)
 
         n_iters = 0
-        while ((guess - y).abs() > self.bisection_eps).any() and n_iters < max_iters:
-            x_hat = x_hat - 0.5 * (guess - y) / dfdx(x_hat)
+#         while ((guess - y).abs() > self.bisection_eps).any() and n_iters < max_iters:
+        while n_iters < max_iters:
+            x_hat = x_hat - (guess - y) / dfdx(x_hat)
             guess = f(x_hat)
             n_iters += 1
-            if n_iters == max_iters:
-                print("ERROR = {}, n_iters = {}, max_iters = {}".format((guess - y).abs().max(), n_iters, max_iters))
-                
+            # if n_iters == max_iters:
+                # print("FPI MAX ERROR = {:.1e}, MEAN ERROR = {:.1e}, n_iters = {}, max_iters = {}".format((guess - y).abs().max(), (guess - y).abs().mean(), n_iters, max_iters))
+        # if ((guess - y).abs() > self.bisection_eps).any():
+#         print("fpi max error = {:.1e}, mean error = {:.1e}".format((guess - y).abs().max(), (guess - y).abs().mean()))
+
         return x_hat
 
 class NITS(NITSPrimitive):
