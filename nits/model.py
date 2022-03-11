@@ -4,20 +4,31 @@ import torch.nn.functional as F
 import numpy as np
 
 class MonotonicInverse(torch.autograd.Function):
+    # computes the inverse and gradient of a monotonic function F(u) = x (think: CDF)
+    # i.e., u = F^{-1}(x)
     @staticmethod
-    def forward(ctx, self, input, params, given_x, x_unrounded):
-        with torch.no_grad():
-            b = self.bisection_search(input, params, given_x, x_unrounded)
-
-        dy = 1 / self.pdf(b, params)
-        ctx.save_for_backward(dy.reshape(len(input), -1))
-        b = b[:, self.non_conditional_dim].unsqueeze(-1)
-        return b
+    def forward(ctx, params, z, search_func, f, b, idx):
+        x = search_func(z, params)
+        
+        ctx.save_for_backward(params, x)
+        ctx.f = f
+        ctx.b = b
+        
+        return x[:, idx].unsqueeze(-1)
 
     @staticmethod
     def backward(ctx, grad_output):
-        dy, = ctx.saved_tensors
-        return None, dy
+        params, x = ctx.saved_tensors
+        
+        with torch.enable_grad():
+            params_ = params.detach().clone().requires_grad_(True)
+            F = ctx.f(x, params_)
+            F.backward(gradient=grad_output)
+        
+        dzdx = ctx.b(x, params)
+        grad = -params_.grad / (dzdx + 1e-6)
+                    
+        return grad, 1 / dzdx * grad_output, None, None, None, None
 
 class NITSPrimitive(nn.Module):
     def __init__(self, arch, start=0., end=1., A_constraint='neg_exp',
@@ -294,9 +305,14 @@ class NITSPrimitive(nn.Module):
         return result
 
     def icdf(self, z, params, given_x=None):
-        return self.fpi(z, params, given_x, None)[:, self.non_conditional_dim].unsqueeze(-1)
+        forward = self.cdf if self.normalize_inverse else self.forward_
+        backward = self.pdf if self.normalize_inverse else self.backward_
+        
+        search_func = lambda x0, x1: self.bisection_search(x0, x1, given_x=given_x, x_unrounded=None)
+        return MonotonicInverse.apply(params, z, search_func, forward, backward, self.non_conditional_dim)
+#         return self.fpi(z, params, given_x, None)[:, self.non_conditional_dim].unsqueeze(-1)
 
-    def fpi(self, y, params, given_x, x_unrounded, max_iters=25):
+    def fpi(self, y, params, given_x, x_unrounded, max_iters=1):
         with torch.no_grad():
             x_hat = self.bisection_search(y, params, given_x, x_unrounded,
                                           max_iters=500, bisection_eps=self.bisection_eps)
@@ -317,16 +333,11 @@ class NITSPrimitive(nn.Module):
         guess = f(x_hat)
 
         n_iters = 0
-#         while ((guess - y).abs() > self.bisection_eps).any() and n_iters < max_iters:
         while n_iters < max_iters:
             x_hat = x_hat - (guess - y) / dfdx(x_hat)
             guess = f(x_hat)
             n_iters += 1
-            # if n_iters == max_iters:
-                # print("FPI MAX ERROR = {:.1e}, MEAN ERROR = {:.1e}, n_iters = {}, max_iters = {}".format((guess - y).abs().max(), (guess - y).abs().mean(), n_iters, max_iters))
-        # if ((guess - y).abs() > self.bisection_eps).any():
-#         print("fpi max error = {:.1e}, mean error = {:.1e}".format((guess - y).abs().max(), (guess - y).abs().mean()))
-
+            
         return x_hat
 
 class NITS(NITSPrimitive):

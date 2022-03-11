@@ -348,7 +348,7 @@ def concat_elu(x):
     return F.elu(torch.cat([x, -x], dim=axis))
 
 class CNN(nn.Module):
-    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3):
+    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, add_background=False):
         super(CNN, self).__init__()
 
         self.resnet_nonlinearity = concat_elu
@@ -356,6 +356,7 @@ class CNN(nn.Module):
         self.nr_filters = nr_filters
         self.input_channels = input_channels
         self.n_params = n_params
+        self.add_background = add_background
 
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
         self.down_layers = nn.ModuleList([CNNLayerDown(down_nr_resnet[i], nr_filters,
@@ -392,8 +393,13 @@ class CNN(nn.Module):
             xs = [int(y) for y in x.size()]
             padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
             self.init_padding = padding.to(x.device)
-
-        x = torch.cat((x, self.init_padding), 1)
+        
+        if self.add_background:
+            background = get_background(x.shape, x.device)
+            x = torch.cat([x, background, self.init_padding], axis=1)
+        else:
+            x = torch.cat((x, self.init_padding), axis=1)
+            
         u_list  = [self.u_init(x)]
         ul_list = [self.ul_init[0](x) + self.ul_init[1](x)]
         for i in range(3):

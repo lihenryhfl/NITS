@@ -170,7 +170,7 @@ else:
     n_params = 160
 
 # build multistep loss (if applicable)
-def compute_loss(model, input, loss_op, loss_weights=[1, 3]):
+def compute_loss(model, input, loss_op, loss_weights=[1, 1]):
     loss = 0.
     og_input = input
     for i in range(args.n_steps - 1):
