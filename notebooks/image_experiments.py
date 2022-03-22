@@ -50,7 +50,7 @@ parser.add_argument('-n', '--nr_filters', type=int, default=160,
 parser.add_argument('-m', '--nr_logistic_mix', type=int, default=10,
                     help='Number of logistic components in the mixture. Higher = more flexible model')
 parser.add_argument('-l', '--lr', type=float,
-                    default=0.0002, help='Base learning rate')
+                    default=0.001, help='Base learning rate')
 parser.add_argument('-e', '--lr_decay', type=float, default=0.999995,
                     help='Learning rate decay, applied every step of the optimization')
 parser.add_argument('-b', '--batch_size', type=int, default=24,
@@ -67,7 +67,7 @@ parser.add_argument('-ns', '--nits', type=bool, default=True,
                     help='nits model')
 parser.add_argument('-at', '--attention', type=str, default='',
                     help='Attention-based NITS')
-parser.add_argument('-ni', '--normalize_inverse', type=bool, default=True,
+parser.add_argument('-ni', '--normalize_inverse', type=bool, default=False,
                     help='apply normalization?')
 parser.add_argument('-es', '--extra_string', type=str, default='',
                     help='extra string to clarify experiment')
@@ -77,8 +77,12 @@ parser.add_argument('-dq', '--dequantize', type=bool, default=False,
                     help='do we dequantize the pixels? performs uniform dequantization')
 parser.add_argument('-a', '--nits_arch', type=list_str_to_list, default='[10,1]',
                    help='Architecture of NITS PNN')
-parser.add_argument('-nst', '--n_steps', type=int, default=1,
-                   help='Number of steps for multistep nits')
+parser.add_argument('-w', '--step_weights', type=list_str_to_list, default='[1]',
+                   help='Weights for each step of multistep NITS')
+parser.add_argument('-bg', '--background', type=bool, default=False,
+                   help='Shall we add a background?')
+parser.add_argument('-ae', '--autoencoder_weight', type=float, default=0.,
+                   help='add autoencoding loss?')
 args = parser.parse_args()
 
 if args.gpu:
@@ -96,10 +100,12 @@ if args.extra_string:
     args.extra_string = '_' + args.extra_string
 
 arch_string = str(args.nits_arch).replace(' ', '').replace(',', '_')[1:-1]
+stepweight_string = str(args.step_weights).replace(' ', '').replace(',', '_')[1:-1]
 
-model_name = 'nits{}_discretized{}_dequantize{}_attention{}_bseps{}_nsteps{}_arch{}{}'.format(
+model_name = 'nits{}_discretized{}_dequantize{}_attention{}_bseps{}_arch{}_stepweights{}_background{}_ae{:.0E}_ni{}{}'.format(
     args.nits, args.discretized, args.dequantize, args.attention,
-    args.bisection_eps, args.n_steps, arch_string, args.extra_string)
+    args.bisection_eps, arch_string, stepweight_string, args.background,
+    args.autoencoder_weight, args.normalize_inverse, args.extra_string)
 print('model_name:', model_name)
 assert not os.path.exists(os.path.join('runs', model_name)), '{} already exists!'.format(model_name)
 
@@ -131,11 +137,6 @@ elif 'cifar' in args.dataset :
                     transform=ds_transforms), batch_size=args.batch_size, shuffle=True, **kwargs)
 
     if not args.nits:
-        # loss_op   = lambda real, fake : discretized_mix_logistic_loss(real, fake)
-        # loss_op   = lambda real, fake : discretized_mix_logistic_loss(real, fake, bad_loss=True)
-        # sample_op = lambda x : sample_from_discretized_mix_logistic(x, args.nr_logistic_mix)
-        # loss_op   = lambda real, fake : unstable_pixelcnn_loss(real, fake, bad_loss=True)
-        # sample_op = lambda x : unstable_pixelcnn_sample(x, args.nr_logistic_mix, bad_loss=True)
         loss_op_t = loss_op = lambda real, fake : unstable_pixelcnn_loss(real, fake, bad_loss=True)
         sample_op = lambda x : unstable_pixelcnn_sample(x, args.nr_logistic_mix, bad_loss=True, quantize=False)
 else :
@@ -145,15 +146,12 @@ assert np.isclose(1e-7, np.power(10., -7))
 
 if args.nits:
     print("NITS")
-    nits_arch = [10, 1]
     nits_bound = 5
-    arch = [1] + nits_arch
+    arch = [1] + args.nits_arch
     nits_model = ConditionalNITS(d=3, start=-nits_bound, end=nits_bound, monotonic_const=np.power(10., -args.monotonic_const),
                                     A_constraint='neg_exp', arch=arch, autoregressive=True,
-                                    # pixelrnn=True, normalize_inverse=True,
                                     pixelrnn=True, normalize_inverse=args.normalize_inverse,
                                     final_layer_constraint='softmax',
-                                    # softmax_temperature=True).to(device)
                                     softmax_temperature=False, bisection_eps=np.power(10., -args.bisection_eps)).to(device)
     print("args.discretized", args.discretized)
     if not args.discretized:
@@ -169,30 +167,35 @@ else:
     # n_params = 100
     n_params = 160
 
+# normalize step_weights
+step_weights = np.array(args.step_weights)
+step_weights = step_weights / (np.sum(step_weights) + 1e-7)
+
 # build multistep loss (if applicable)
-# def compute_loss(model, input, loss_op):
-    # loss = 0.
-    # og_input = input
-    # for i in range(args.n_steps - 1):
-        # output = model(input)
-        # loss += loss_op(og_input, output)
-        # input = sample_op(output)
-
-    # output = model(input)
-    # loss += loss_op(og_input, output)
-
-    # return loss / args.n_steps
-
-def compute_loss(model, input, loss_op):
+def compute_loss(model, input, loss_op, test=False):
+    loss = torch.tensor(0., device=device)
+    ae_loss = torch.tensor(0., device=device)
     og_input = input
-    for i in range(args.n_steps - 1):
-        output = model(input)
-        input = sample_op(output)
+    og_output = output = model(input)
+    i = -1
 
-    output = model(input)
-    loss = loss_op(og_input, output)
-    return loss
+    if test:
+        loss = loss_op(og_input, output)
+    else:
+        for i in range(len(step_weights) - 1):
+            loss += loss_op(og_input, output) * step_weights[i]
+            input = sample_op(output)
+            output = model(input)
 
+        if step_weights[i+1] > 0:
+            loss += loss_op(og_input, output) * step_weights[i + 1]
+
+    if test or args.autoencoder_weight > 0:
+        input_reconstruction = sample_op(output)
+        # ae_loss = ((og_input - input_reconstruction) ** 2).sum() * 120
+        ae_loss = ((og_input - input_reconstruction) ** 2).sum() * args.autoencoder_weight
+
+    return loss, ae_loss
 
 if args.attention == 'full':
     print("USING FACNN")
@@ -205,7 +208,7 @@ elif args.attention == 'snail':
 elif args.attention == '':
     print("USING PixelCNN")
     model = CNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, n_params=n_params)
+                input_channels=input_channels, n_params=n_params, background=args.background)
 model = model.to(device)
 
 def sample(model):
@@ -228,29 +231,37 @@ if args.load_epoch > 0:
     print('model parameters loaded')
     model = model.to(device)
 
-    print("sampling...")
-    sample_t = sample(model)
-    sample_t = rescaling_inv(sample_t)
-    utils.save_image(sample_t,'/data/image_model/images/test.png',
-            nrow=5, padding=0)
-
-optimizer = optim.Adam(model.parameters(), lr=args.lr)
+optimizer = optim.Adam(model.parameters(), lr=args.lr, beta1=0.95, beta2=0.995)
 scheduler = lr_scheduler.StepLR(optimizer, step_size=1, gamma=args.lr_decay)
 
 print('starting training')
 best_loss = np.inf
+best_ae_loss = np.inf
 for epoch in range(args.load_epoch, args.max_epochs):
     model.train(True)
     train_loss = 0.
+    train_ae_loss = 0.
+    tot_time1 = 0.
+    tot_time2 = 0.
     time_ = time.time()
     model.train()
     for batch_idx, (input,_) in enumerate(train_loader):
         input = input.to(device)
-        loss = compute_loss(model, input, loss_op)
+        time1_ = time.time()
+        loss, ae_loss = compute_loss(model, input, loss_op)
+        tot_time1 += time.time() - time1_
         optimizer.zero_grad()
-        loss.backward()
+        time2_ = time.time()
+        (loss + ae_loss).backward()
+
         optimizer.step()
-        train_loss += loss.detach().cpu().numpy()
+        scheduler.step()
+
+        tot_time2 += time.time() - time2_
+        if args.autoencoder_weight > 0 and np.sum(step_weights) < 1e-3:
+            train_loss += ae_loss.detach().cpu().numpy()
+        else:
+            train_loss += loss.detach().cpu().numpy()
         if (batch_idx +1) % args.print_every == 0 :
             if not args.nits or args.discretized:
                 deno = args.print_every * args.batch_size * np.prod(obs) * np.log(2.)
@@ -259,36 +270,42 @@ for epoch in range(args.load_epoch, args.max_epochs):
                 deno = args.print_every * args.batch_size
                 train_loss = train_loss / deno
                 train_loss = ll_to_bpd(-train_loss, dataset=args.dataset)
-            print('loss : {:.4f}, time : {:.4f}'.format(
-                (train_loss),
-                (time.time() - time_)))
+            print('loss : {:.4f}, time : {:.4f}, loss time : {:.4f}, backprop time : {:.4f}'.format(
+            (train_loss),
+            (time.time() - time_),
+            (tot_time1),
+            (tot_time2)))
+            tot_time1 = 0.
+            tot_time2 = 0.
             train_loss = 0.
             time_ = time.time()
 
 
-    # decrease learning rate
-    scheduler.step()
-
     model.eval()
     test_loss = 0.
+    test_ae_loss = 0.
     with torch.no_grad():
         for batch_idx, (input,_) in enumerate(test_loader):
             input = input.to(device)
-            loss = compute_loss(model, input, loss_op_t)
+            loss, ae_loss = compute_loss(model, input, loss_op_t, test=True)
             test_loss += loss.detach().cpu().numpy()
-            del loss
+            test_ae_loss += ae_loss.detach().cpu().numpy()
+            del loss, ae_loss
 
     deno = batch_idx * args.batch_size * np.prod(obs) * np.log(2.)
     if not args.nits or args.discretized:
         deno = batch_idx * args.batch_size * np.prod(obs) * np.log(2.)
-        test_loss = test_loss / deno
+        test_loss /= deno
+        test_ae_loss /= deno
     else:
         deno = batch_idx * args.batch_size
         test_loss = test_loss / deno
+        test_ae_loss /= (deno * np.prod(obs) * np.log(2.))
         test_loss = ll_to_bpd(-test_loss, dataset=args.dataset)
 
     best_loss = min(test_loss, best_loss)
-    print('model_name: {},  test loss: {:.5f}, best loss: {:.5f}'.format(model_name, test_loss, best_loss))
+    best_ae_loss = min(test_ae_loss, best_ae_loss)
+    print('{},  test loss: {:.5f}, best loss: {:.5f}, ae loss: {:.5f}, best ae loss: {:.5f}'.format(model_name, test_loss, best_loss, test_ae_loss, best_ae_loss))
 
     if (epoch + 1) % args.save_interval == 0:
         print('sampling...')

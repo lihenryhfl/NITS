@@ -348,7 +348,7 @@ def concat_elu(x):
     return F.elu(torch.cat([x, -x], dim=axis))
 
 class CNN(nn.Module):
-    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, add_background=False):
+    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, background=False):
         super(CNN, self).__init__()
 
         self.resnet_nonlinearity = concat_elu
@@ -356,7 +356,7 @@ class CNN(nn.Module):
         self.nr_filters = nr_filters
         self.input_channels = input_channels
         self.n_params = n_params
-        self.add_background = add_background
+        self.background = background
 
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
         self.down_layers = nn.ModuleList([CNNLayerDown(down_nr_resnet[i], nr_filters,
@@ -377,12 +377,15 @@ class CNN(nn.Module):
         self.upsize_ul_stream = nn.ModuleList([DownRightShiftedDeconv2d(nr_filters,
                                                     nr_filters, stride=(2,2)) for _ in range(2)])
 
-        self.u_init = DownShiftedConv2d(input_channels + 1, nr_filters, filter_size=(2,3),
+        # input shape is slightly different due to various types of padding
+        padded_input_channels = input_channels + 7 if background else input_channels + 1
+        
+        self.u_init = DownShiftedConv2d(padded_input_channels, nr_filters, filter_size=(2,3),
                         shift_output_down=True)
-
-        self.ul_init = nn.ModuleList([DownShiftedConv2d(input_channels + 1, nr_filters,
+        
+        self.ul_init = nn.ModuleList([DownShiftedConv2d(padded_input_channels, nr_filters,
                                             filter_size=(1,3), shift_output_down=True),
-                                       DownRightShiftedConv2d(input_channels + 1, nr_filters,
+                                       DownRightShiftedConv2d(padded_input_channels, nr_filters,
                                             filter_size=(2,1), shift_output_right=True)])
 
         self.nin_out = NetworkInNetwork(nr_filters, n_params)
@@ -394,7 +397,7 @@ class CNN(nn.Module):
             padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
             self.init_padding = padding.to(x.device)
         
-        if self.add_background:
+        if self.background:
             background = get_background(x.shape, x.device)
             x = torch.cat([x, background, self.init_padding], axis=1)
         else:
