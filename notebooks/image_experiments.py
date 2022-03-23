@@ -34,8 +34,6 @@ parser.add_argument('-o', '--save_dir', type=str, default='models',
                     help='Location for parameter checkpoints and samples')
 parser.add_argument('-d', '--dataset', type=str,
                     default='cifar', help='Can be either cifar|mnist')
-parser.add_argument('-p', '--print_every', type=int, default=50,
-                    help='how many iterations between print statements')
 parser.add_argument('-t', '--save_interval', type=int, default=2,
                     help='Every how many epochs to write checkpoint/samples?')
 # parser.add_argument('-r', '--load_params', type=str, default=None,
@@ -53,7 +51,7 @@ parser.add_argument('-l', '--lr', type=float,
                     default=0.001, help='Base learning rate')
 parser.add_argument('-e', '--lr_decay', type=float, default=0.999995,
                     help='Learning rate decay, applied every step of the optimization')
-parser.add_argument('-b', '--batch_size', type=int, default=24,
+parser.add_argument('-b', '--batch_size', type=int, default=20,
                     help='Batch size during training per GPU')
 parser.add_argument('-x', '--max_epochs', type=int,
                     default=5000, help='How many epochs to run in total?')
@@ -82,6 +80,8 @@ parser.add_argument('-w', '--step_weights', type=list_str_to_list, default='[1]'
 parser.add_argument('-bg', '--background', type=bool, default=False,
                    help='Shall we add a background?')
 parser.add_argument('-ae', '--autoencoder_weight', type=float, default=0.,
+                   help='add autoencoding loss?')
+parser.add_argument('-pd', '--polyak_decay', type=float, default=0.9995,
                    help='add autoencoding loss?')
 args = parser.parse_args()
 
@@ -201,15 +201,20 @@ if args.attention == 'full':
     print("USING FACNN")
     model = FACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
                 input_channels=input_channels, n_params=n_params)
+    shadow = FACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
+                input_channels=input_channels, n_params=n_params)
 elif args.attention == 'snail':
     print("USING SNAIL")
     model = ACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
+                input_channels=input_channels, n_params=n_params)
+    shadow = ACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
                 input_channels=input_channels, n_params=n_params)
 elif args.attention == '':
     print("USING PixelCNN")
     model = CNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
                 input_channels=input_channels, n_params=n_params, background=args.background)
-model = model.to(device)
+    shadow = CNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
+                input_channels=input_channels, n_params=n_params, background=args.background)
 
 def sample(model):
     with torch.no_grad():
@@ -223,6 +228,21 @@ def sample(model):
                 data[:, :, i, j] = out_sample[:, :, i, j].detach().cpu()
     return data
 
+optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.95,0.995))
+scheduler = lr_scheduler.StepLR(optimizer, step_size=1, gamma=args.lr_decay)
+
+# compute initialization
+model = model.to(device)
+for batch_idx, (input,_) in enumerate(train_loader):
+    input = input.to(device)
+    out = model(input)
+    del out
+    break
+
+# apply EMA
+model = EMA(model, shadow, decay=args.polyak_decay)
+model = model.to(device)
+
 if args.load_epoch > 0:
     load_path = '/data/image_model/models/{}_{}.pth'.format(model_name, args.load_epoch)
     print("loading parameters from path =", load_path)
@@ -231,56 +251,42 @@ if args.load_epoch > 0:
     print('model parameters loaded')
     model = model.to(device)
 
-optimizer = optim.Adam(model.parameters(), lr=args.lr, beta1=0.95, beta2=0.995)
-scheduler = lr_scheduler.StepLR(optimizer, step_size=1, gamma=args.lr_decay)
+def standardize_loss(loss, batch_idx):
+    if not args.nits or args.discretized:
+        loss /= batch_idx * args.batch_size * np.prod(obs) * np.log(2.)
+    else:
+        loss /= batch_idx * args.batch_size
+        loss = ll_to_bpd(-loss, dataset=args.dataset)
+
+    return loss
 
 print('starting training')
-best_loss = np.inf
-best_ae_loss = np.inf
 for epoch in range(args.load_epoch, args.max_epochs):
-    model.train(True)
     train_loss = 0.
     train_ae_loss = 0.
-    tot_time1 = 0.
-    tot_time2 = 0.
     time_ = time.time()
     model.train()
     for batch_idx, (input,_) in enumerate(train_loader):
         input = input.to(device)
-        time1_ = time.time()
         loss, ae_loss = compute_loss(model, input, loss_op)
-        tot_time1 += time.time() - time1_
         optimizer.zero_grad()
-        time2_ = time.time()
         (loss + ae_loss).backward()
 
         optimizer.step()
         scheduler.step()
+        model.update()
 
-        tot_time2 += time.time() - time2_
-        if args.autoencoder_weight > 0 and np.sum(step_weights) < 1e-3:
-            train_loss += ae_loss.detach().cpu().numpy()
-        else:
-            train_loss += loss.detach().cpu().numpy()
-        if (batch_idx +1) % args.print_every == 0 :
-            if not args.nits or args.discretized:
-                deno = args.print_every * args.batch_size * np.prod(obs) * np.log(2.)
-                train_loss = train_loss / deno
-            else:
-                deno = args.print_every * args.batch_size
-                train_loss = train_loss / deno
-                train_loss = ll_to_bpd(-train_loss, dataset=args.dataset)
-            print('loss : {:.4f}, time : {:.4f}, loss time : {:.4f}, backprop time : {:.4f}'.format(
-            (train_loss),
-            (time.time() - time_),
-            (tot_time1),
-            (tot_time2)))
-            tot_time1 = 0.
-            tot_time2 = 0.
-            train_loss = 0.
-            time_ = time.time()
+        train_ae_loss += ae_loss.detach().cpu().numpy()
+        train_loss += loss.detach().cpu().numpy()
 
+        if batch_idx > 100:
+            break
 
+    # compute train loss
+    train_loss = standardize_loss(train_loss, batch_idx)
+    train_ae_loss /= batch_idx * args.batch_size * np.prod(obs)
+
+    # compute test loss
     model.eval()
     test_loss = 0.
     test_ae_loss = 0.
@@ -292,20 +298,11 @@ for epoch in range(args.load_epoch, args.max_epochs):
             test_ae_loss += ae_loss.detach().cpu().numpy()
             del loss, ae_loss
 
-    deno = batch_idx * args.batch_size * np.prod(obs) * np.log(2.)
-    if not args.nits or args.discretized:
-        deno = batch_idx * args.batch_size * np.prod(obs) * np.log(2.)
-        test_loss /= deno
-        test_ae_loss /= deno
-    else:
-        deno = batch_idx * args.batch_size
-        test_loss = test_loss / deno
-        test_ae_loss /= (deno * np.prod(obs) * np.log(2.))
-        test_loss = ll_to_bpd(-test_loss, dataset=args.dataset)
+    test_loss = standardize_loss(test_loss, batch_idx)
+    test_ae_loss /= batch_idx * args.batch_size * np.prod(obs)
 
-    best_loss = min(test_loss, best_loss)
-    best_ae_loss = min(test_ae_loss, best_ae_loss)
-    print('{},  test loss: {:.5f}, best loss: {:.5f}, ae loss: {:.5f}, best ae loss: {:.5f}'.format(model_name, test_loss, best_loss, test_ae_loss, best_ae_loss))
+    print('Epoch: {}, time: {:.2f}, train loss: {:.4f}, ae loss: {:.4f} | test loss: {:.4f}, ae loss: {:.4f}'.format(
+        epoch, time.time() - time_, train_loss, train_ae_loss, test_loss, test_ae_loss))
 
     if (epoch + 1) % args.save_interval == 0:
         print('sampling...')
@@ -315,4 +312,6 @@ for epoch in range(args.load_epoch, args.max_epochs):
                 nrow=5, padding=0)
 
     if (epoch + 1) % 10 == 0:
-        torch.save(model.state_dict(), '/data/image_model/models/{}_{}.pth'.format(model_name, epoch))
+        save_path = '/data/image_model/models/{}_{}.pth'.format(model_name, epoch)
+        print("saving model to {}".format(save_path))
+        torch.save(model.state_dict(), save_path)

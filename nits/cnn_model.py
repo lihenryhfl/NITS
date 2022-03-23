@@ -1,4 +1,8 @@
 import pdb
+from copy import deepcopy
+from collections import OrderedDict
+from sys import stderr
+
 import torch
 import numpy as np
 import torch.nn as nn
@@ -89,6 +93,54 @@ def cnn_nits_sample(params, nits_model, quantize=False):
         imgs = ((imgs + 1) * 127.5).round() / 127.5 - 1
 
     return imgs
+
+
+class EMA(nn.Module):
+    def __init__(self, model: nn.Module, shadow: nn.Module, decay: float):
+        super().__init__()
+        self.decay = decay
+
+        self.model = model
+        self.shadow = shadow
+
+        self.update(copy_all=True)
+
+        for param in self.shadow.parameters():
+            param.detach_()
+
+    @torch.no_grad()
+    def update(self, copy_all=False):
+        if not self.training:
+            print("EMA update should only be called during training", file=stderr, flush=True)
+            return
+
+        model_params = OrderedDict(self.model.named_parameters())
+        shadow_params = OrderedDict(self.shadow.named_parameters())
+
+        # check if both model contains the same set of keys
+        assert model_params.keys() == shadow_params.keys()
+
+        for name, param in model_params.items():
+            if copy_all:
+                shadow_params[name].copy_(param)
+            else:
+                shadow_params[name].sub_((1. - self.decay) * (shadow_params[name] - param))
+
+        model_buffers = OrderedDict(self.model.named_buffers())
+        shadow_buffers = OrderedDict(self.shadow.named_buffers())
+
+        # check if both model contains the same set of keys
+        assert model_buffers.keys() == shadow_buffers.keys()
+
+        for name, buffer in model_buffers.items():
+            # buffers are copied
+            shadow_buffers[name].copy_(buffer)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            return self.model(inputs)
+        else:
+            return self.shadow(inputs)
 
 class Batcher:
     def __init__(self, x, batch_size):
@@ -379,10 +431,10 @@ class CNN(nn.Module):
 
         # input shape is slightly different due to various types of padding
         padded_input_channels = input_channels + 7 if background else input_channels + 1
-        
+
         self.u_init = DownShiftedConv2d(padded_input_channels, nr_filters, filter_size=(2,3),
                         shift_output_down=True)
-        
+
         self.ul_init = nn.ModuleList([DownShiftedConv2d(padded_input_channels, nr_filters,
                                             filter_size=(1,3), shift_output_down=True),
                                        DownRightShiftedConv2d(padded_input_channels, nr_filters,
@@ -390,19 +442,18 @@ class CNN(nn.Module):
 
         self.nin_out = NetworkInNetwork(nr_filters, n_params)
 
-
     def forward(self, x):
         if not hasattr(self, 'init_padding') or len(self.init_padding) != len(x):
             xs = [int(y) for y in x.size()]
             padding = Variable(torch.ones(xs[0], 1, xs[2], xs[3]), requires_grad=False)
             self.init_padding = padding.to(x.device)
-        
+
         if self.background:
             background = get_background(x.shape, x.device)
             x = torch.cat([x, background, self.init_padding], axis=1)
         else:
             x = torch.cat((x, self.init_padding), axis=1)
-            
+
         u_list  = [self.u_init(x)]
         ul_list = [self.ul_init[0](x) + self.ul_init[1](x)]
         for i in range(3):
@@ -463,10 +514,50 @@ class ChannelLinear(nn.Module):
 
         return y[:,:,0,:,:]
 
+class Linear(nn.Module):
+    def __init__(self, dim_in, dim_out):
+        super(Linear, self).__init__()
+        self.linear = wn(ChannelLinear(dim_in, dim_out))
+        self.first_forward = True
+
+    def forward(self, x, **kwargs):
+        if self.first_forward:
+            x_ = self.linear(x, **kwargs)
+            x_ = x_.permute(0, 2, 3, 1)
+            x_ = x_.reshape(-1, self.linear.dim_out)
+            m, v = x_.mean(dim=(0,)), x_.var(dim=(0,))
+            scale_init = 1 / (v + 1e-8).sqrt()
+            self.linear.weight_v.data = torch.randn_like(self.linear.weight_v) * 0.05
+            self.linear.weight_g.data = torch.ones_like(self.linear.weight_g) * scale_init.reshape(-1, 1)
+            self.linear.bias.data = torch.zeros_like(self.linear.bias) - (m * scale_init)
+            # we only ever run this once
+            self.first_forward = False
+        return self.linear(x, **kwargs)
+
+class Conv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, **kwargs):
+        super(Conv2d, self).__init__()
+        self.conv = wn(nn.Conv2d(in_channels, out_channels, kernel_size, stride, **kwargs))
+        self.first_forward = True
+
+        self.in_channels, self.out_channels = in_channels, out_channels
+
+    def forward(self, x, **kwargs):
+        if self.first_forward:
+            x_ = self.conv(x, **kwargs)
+            m, v = x_.mean(dim=(0, 2, 3)), x_.var(dim=(0, 2, 3))
+            scale_init = 1 / (v + 1e-10).sqrt()
+            self.conv.weight_v.data = torch.randn_like(self.conv.weight_v) * 0.05
+            self.conv.weight_g.data = torch.ones_like(self.conv.weight_g) * scale_init.reshape(-1, 1, 1, 1)
+            self.conv.bias.data = torch.zeros_like(self.conv.bias) - (m * scale_init)
+            # we only ever run this once
+            self.first_forward = False
+        return self.conv(x, **kwargs)
+
 class NetworkInNetwork(nn.Module):
     def __init__(self, dim_in, dim_out, permute=True):
         super(NetworkInNetwork, self).__init__()
-        self.lin_a = wn(ChannelLinear(dim_in, dim_out))
+        self.lin_a = Linear(dim_in, dim_out)
         self.dim_out = dim_out
         self.permute = permute
 
@@ -476,14 +567,13 @@ class NetworkInNetwork(nn.Module):
         out = self.lin_a(x)
         return out
 
-
 class DownShiftedConv2d(nn.Module):
     def __init__(self, num_filters_in, num_filters_out, filter_size=(2,3), stride=(1,1),
                     shift_output_down=False, norm='weight_norm'):
         super(DownShiftedConv2d, self).__init__()
 
         assert norm in [None, 'batch_norm', 'weight_norm']
-        self.conv = nn.Conv2d(num_filters_in, num_filters_out, filter_size, stride)
+        self.conv = Conv2d(num_filters_in, num_filters_out, filter_size, stride)
         self.shift_output_down = shift_output_down
         self.norm = norm
         # arguments of zeropad2d: padding_left, padding_right, padding_top, padding_bottom
@@ -492,11 +582,6 @@ class DownShiftedConv2d(nn.Module):
                                   int((filter_size[1] - 1) / 2),
                                   filter_size[0] - 1,
                                   0) )
-
-        if norm == 'weight_norm':
-            self.conv = wn(self.conv)
-        elif norm == 'batch_norm':
-            self.bn = nn.BatchNorm2d(num_filters_out)
 
     def forward(self, x):
         x = self.pad(x)
@@ -529,14 +614,9 @@ class DownRightShiftedConv2d(nn.Module):
         # arguments of zeropad2d: padding_left, padding_right, padding_top, padding_bottom
         # therefore, for filter_size = (2, 2), this pads 1 left, 0 right, 1 above, and 0 below
         self.pad = nn.ZeroPad2d((filter_size[1] - 1, 0, filter_size[0] - 1, 0))
-        self.conv = nn.Conv2d(num_filters_in, num_filters_out, filter_size, stride=stride)
+        self.conv = Conv2d(num_filters_in, num_filters_out, filter_size, stride=stride)
         self.shift_output_right = shift_output_right
         self.norm = norm
-
-        if norm == 'weight_norm':
-            self.conv = wn(self.conv)
-        elif norm == 'batch_norm':
-            self.bn = nn.BatchNorm2d(num_filters_out)
 
     def forward(self, x):
         x = self.pad(x)
