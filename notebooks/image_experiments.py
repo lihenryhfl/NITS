@@ -34,10 +34,8 @@ parser.add_argument('-o', '--save_dir', type=str, default='models',
                     help='Location for parameter checkpoints and samples')
 parser.add_argument('-d', '--dataset', type=str,
                     default='cifar', help='Can be either cifar|mnist')
-parser.add_argument('-t', '--save_interval', type=int, default=2,
+parser.add_argument('-t', '--save_interval', type=int, default=5,
                     help='Every how many epochs to write checkpoint/samples?')
-# parser.add_argument('-r', '--load_params', type=str, default=None,
-                    # help='Restore training from previous model checkpoint?')
 parser.add_argument('-r', '--load_epoch', type=int, default=0,
                     help='Restore training from previous model checkpoint? If so, which epoch?')
 # model
@@ -48,7 +46,7 @@ parser.add_argument('-n', '--nr_filters', type=int, default=160,
 parser.add_argument('-m', '--nr_logistic_mix', type=int, default=10,
                     help='Number of logistic components in the mixture. Higher = more flexible model')
 parser.add_argument('-l', '--lr', type=float,
-                    default=0.001, help='Base learning rate')
+                    default=1e-3, help='Base learning rate')
 parser.add_argument('-e', '--lr_decay', type=float, default=0.999995,
                     help='Learning rate decay, applied every step of the optimization')
 parser.add_argument('-b', '--batch_size', type=int, default=20,
@@ -82,7 +80,7 @@ parser.add_argument('-bg', '--background', type=bool, default=False,
 parser.add_argument('-ae', '--autoencoder_weight', type=float, default=0.,
                    help='add autoencoding loss?')
 parser.add_argument('-pd', '--polyak_decay', type=float, default=0.9995,
-                   help='add autoencoding loss?')
+                   help='decay factor for EMA')
 args = parser.parse_args()
 
 if args.gpu:
@@ -110,14 +108,13 @@ print('model_name:', model_name)
 assert not os.path.exists(os.path.join('runs', model_name)), '{} already exists!'.format(model_name)
 
 sample_batch_size = 25
-obs = (1, 28, 28) if 'mnist' in args.dataset else (3, 32, 32)
-input_channels = obs[0]
 rescaling     = lambda x : (x - .5) * 2.
 rescaling_inv = lambda x : .5 * x  + .5
 kwargs = {'num_workers':1, 'pin_memory':True, 'drop_last':True}
 ds_transforms = transforms.Compose([transforms.ToTensor(), rescaling])
 
-if 'mnist' in args.dataset :
+if 'mnist' in args.dataset:
+    obs = (1, 28, 28)
     train_loader = torch.utils.data.DataLoader(datasets.MNIST(args.data_dir, download=True,
                         train=True, transform=ds_transforms), batch_size=args.batch_size,
                             shuffle=True, **kwargs)
@@ -129,7 +126,8 @@ if 'mnist' in args.dataset :
         loss_op   = lambda real, fake : discretized_mix_logistic_loss_1d(real, fake)
         sample_op = lambda x : sample_from_discretized_mix_logistic_1d(x, args.nr_logistic_mix)
 
-elif 'cifar' in args.dataset :
+elif 'cifar' in args.dataset:
+    obs = (3, 32, 32)
     train_loader = torch.utils.data.DataLoader(datasets.CIFAR10(args.data_dir, train=True,
         download=True, transform=ds_transforms), batch_size=args.batch_size, shuffle=True, **kwargs)
 
@@ -137,9 +135,9 @@ elif 'cifar' in args.dataset :
                     transform=ds_transforms), batch_size=args.batch_size, shuffle=True, **kwargs)
 
     if not args.nits:
-        loss_op_t = loss_op = lambda real, fake : unstable_pixelcnn_loss(real, fake, bad_loss=True)
-        sample_op = lambda x : unstable_pixelcnn_sample(x, args.nr_logistic_mix, bad_loss=True, quantize=False)
-else :
+        loss_op_t = loss_op = lambda real, fake : unstable_pixelcnn_loss(real, fake, bad_loss=False)
+        sample_op = lambda x : unstable_pixelcnn_sample(x, args.nr_logistic_mix, bad_loss=False, quantize=False)
+else:
     raise Exception('{} dataset not in {mnist, cifar10}'.format(args.dataset))
 
 assert np.isclose(1e-7, np.power(10., -7))
@@ -192,11 +190,11 @@ def compute_loss(model, input, loss_op, test=False):
 
     if test or args.autoencoder_weight > 0:
         input_reconstruction = sample_op(output)
-        # ae_loss = ((og_input - input_reconstruction) ** 2).sum() * 120
         ae_loss = ((og_input - input_reconstruction) ** 2).sum() * args.autoencoder_weight
 
     return loss, ae_loss
 
+input_channels = obs[0]
 if args.attention == 'full':
     print("USING FACNN")
     model = FACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
@@ -228,7 +226,7 @@ def sample(model):
                 data[:, :, i, j] = out_sample[:, :, i, j].detach().cpu()
     return data
 
-optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.95,0.995))
+optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.95,0.9995))
 scheduler = lr_scheduler.StepLR(optimizer, step_size=1, gamma=args.lr_decay)
 
 # compute initialization
@@ -239,15 +237,10 @@ for batch_idx, (input,_) in enumerate(train_loader):
     del out
     break
 
-# apply EMA
-model = EMA(model, shadow, decay=args.polyak_decay)
-model = model.to(device)
-
 if args.load_epoch > 0:
     load_path = '/data/image_model/models/{}_{}.pth'.format(model_name, args.load_epoch)
     print("loading parameters from path =", load_path)
     load_part_of_model(model, load_path, device)
-    # load_part_of_model(model, load_path, 'cpu')
     print('model parameters loaded')
     model = model.to(device)
 
@@ -274,13 +267,17 @@ for epoch in range(args.load_epoch, args.max_epochs):
 
         optimizer.step()
         scheduler.step()
-        model.update()
+
+        if isinstance(model, EMA):
+            model.update()
+        else:
+            model = EMA(model, shadow, decay=args.polyak_decay).to(device)
 
         train_ae_loss += ae_loss.detach().cpu().numpy()
         train_loss += loss.detach().cpu().numpy()
 
-        if batch_idx > 100:
-            break
+        # if batch_idx > 50:
+            # break
 
     # compute train loss
     train_loss = standardize_loss(train_loss, batch_idx)
