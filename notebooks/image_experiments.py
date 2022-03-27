@@ -231,11 +231,15 @@ scheduler = lr_scheduler.StepLR(optimizer, step_size=1, gamma=args.lr_decay)
 
 # compute initialization
 model = model.to(device)
-for batch_idx, (input,_) in enumerate(train_loader):
-    input = input.to(device)
-    out = model(input)
-    del out
-    break
+init_loader = torch.utils.data.DataLoader(datasets.MNIST(args.data_dir, download=True,
+                    train=True, transform=ds_transforms), batch_size=args.batch_size * 2,
+                        shuffle=True, **kwargs)
+with torch.no_grad():
+    for batch_idx, (input,_) in enumerate(init_loader):
+        input = input.to(device)
+        out = model(input)
+        del input, out
+        break
 
 if args.load_epoch > 0:
     load_path = '/data/image_model/models/{}_{}.pth'.format(model_name, args.load_epoch)
