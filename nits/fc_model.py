@@ -102,15 +102,37 @@ class RotationParamModel(nn.Module):
 
         return data
     
+class Normalizer(nn.Linear):
+    def __init__(self, in_features, out_features, bias=True):
+        super(Normalizer, self).__init__(in_features=in_features, out_features=out_features, bias=bias)
+        self.register_buffer("weights_set", torch.tensor(False).bool())
+        self.d = in_features
+        
+    def set_weights(self, x, device):
+        assert x.device == torch.device('cpu')
+        m, v = x.mean(dim=(0,)), x.var(dim=(0,))
+        self.bias.data = -m
+        self.weight.data = torch.diag(1 / (v + 1e-8).sqrt())
+        self.weight.requires_grad = False
+        self.bias.requires_grad = False
+        self.weights_set.data = torch.tensor(True).bool().to(self.weights_set.device)
+
+    def forward(self, x):
+        if not self.weights_set:
+            raise Exception("Need to set weights first!")
+            
+        return F.linear(x, self.weight, self.bias)
     
 class ResMADEModel(nn.Module):
     def __init__(self, d, nits_model, n_residual_blocks=4, hidden_dim=512, 
                  dropout_probability=0., use_batch_norm=False, 
-                 zero_initialization=True, rotate=True):
+                 zero_initialization=True, weight_norm=False,
+                 rotate=True, normalizer=None):
         super(ResMADEModel, self).__init__()
         self.d = d
         self.n_params = nits_model.n_params
         self.nits_model = nits_model
+        self.normalizer = normalizer
         
         self.mlp = ResidualMADE(
             input_dim=self.d,
@@ -119,7 +141,8 @@ class ResMADEModel(nn.Module):
             output_dim_multiplier=nits_model.n_params,
             dropout_probability=dropout_probability,
             use_batch_norm=use_batch_norm,
-            zero_initialization=zero_initialization
+            zero_initialization=zero_initialization,
+            weight_norm=weight_norm
         )
         
         self.rotate = rotate
@@ -139,12 +162,12 @@ class ResMADEModel(nn.Module):
         return x.mm(P)
         
     def forward(self, x):
-        n = len(x)
-        
         # rotate x
         x = self.proj(x)
         
         # obtain parameters
+        if self.normalizer is not None:
+            x = self.normalizer(x)
         params = self.mlp(x)
         
         # compute log likelihood
@@ -154,14 +177,14 @@ class ResMADEModel(nn.Module):
     
     def sample(self, n):
         with torch.no_grad():
-            data = torch.zeros((n, self.d), device=device)
+            data = torch.zeros((n, self.d), device=A.device)
 
             for i in range(self.d):
                 # rotate x
-                x = self.proj(x)
+#                 x_proj = self.proj(data)
 
                 # obtain parameters
-                params = self.mlp(x)
+                params = self.mlp(data)
                 
                 sample = self.nits_model.sample(1, params)
                 data[:,i] = sample[:,i]

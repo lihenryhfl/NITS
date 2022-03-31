@@ -36,7 +36,7 @@ class NITSPrimitive(nn.Module):
                  final_layer_constraint='softmax', non_conditional_dim=0,
                  add_residual_connections=False, pixelrnn=False,
                  softmax_temperature=True, normalize_inverse=True,
-                 bisection_eps=1e-6):
+                 bisection_eps=1e-6, normalizer=None):
         super(NITSPrimitive, self).__init__()
         self.arch = arch
         self.monotonic_const = monotonic_const
@@ -49,6 +49,7 @@ class NITSPrimitive(nn.Module):
         self.softmax_temperature = softmax_temperature
         self.normalize_inverse = normalize_inverse
         self.bisection_eps = bisection_eps
+        self.normalizer = normalizer
 
         # count parameters
         self.n_params = 0
@@ -115,16 +116,26 @@ class NITSPrimitive(nn.Module):
             return x
 
     def forward_(self, x, params, x_unrounded=None, return_intermediaries=False):
-        # the monotonic constant is only applied w.r.t. the first input dimension
-        x = x.clone()
-        prev_x = monotonic_x = x[:,self.non_conditional_dim].unsqueeze(-1)
-
         # store pre-activations and weight matrices
         pre_activations = []
         nonlinearities = []
         As = []
         bs = []
         residuals = []
+        
+        # the monotonic constant is only applied w.r.t. the first input dimension
+        x = x.clone()
+        prev_x = monotonic_x = x[:,self.non_conditional_dim].unsqueeze(-1)
+        
+        if self.normalizer is not None:
+#             x = self.normalizer(x)
+            idx = self.non_conditional_dim
+            x = self.normalizer.weight[
+            As.append(self.normalizer.weight)
+            bs.append(self.normalizer.bias)
+            pre_activations.append(x)
+            nonlinearities.append('linear')
+            residuals.append(False)
 
         if self.pixelrnn:
             cur_idx = 3 * self.arch[1]
@@ -224,8 +235,11 @@ class NITSPrimitive(nn.Module):
         elif activation == 'sigmoid':
             sig_act = pre_activation.sigmoid()
             grad = grad * sig_act * (1 - sig_act)
-
-        result = torch.einsum('ni,nij->nj', grad, A)
+        
+        if len(A.shape) == 2:
+            result = torch.einsum('ni,ij->nj', grad, A)
+        elif len(A.shape) == 3:
+            result = torch.einsum('ni,nij->nj', grad, A)
 
         if residual:
             result = result + orig_grad
@@ -344,7 +358,7 @@ class NITS(NITSPrimitive):
     def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax',
                  add_residual_connections=False, normalize_inverse=True,
-                 softmax_temperature=True):
+                 softmax_temperature=True, normalizer=None):
         super(NITS, self).__init__(arch, start, end,
                                            A_constraint=A_constraint,
                                            monotonic_const=monotonic_const,
@@ -355,6 +369,7 @@ class NITS(NITSPrimitive):
         self.add_residual_connections=add_residual_connections
         self.normalize_inverse = normalize_inverse
         self.softmax_temperature = softmax_temperature
+        self.normalizer = normalizer
 
         self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
         self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
@@ -365,7 +380,8 @@ class NITS(NITSPrimitive):
                                   final_layer_constraint=final_layer_constraint,
                                   add_residual_connections=add_residual_connections,
                                   normalize_inverse=normalize_inverse,
-                                  softmax_temperature=softmax_temperature)
+                                  softmax_temperature=softmax_temperature,
+                                  normalizer=normalizer)
 
     def multidim_reshape(self, x, params):
         n = max(len(x), len(params))
@@ -457,7 +473,7 @@ class ConditionalNITS(nn.Module):
                  monotonic_const=1e-2, final_layer_constraint='softmax',
                  autoregressive=True, pixelrnn=False, normalize_inverse=True,
                  add_residual_connections=False, softmax_temperature=True,
-                 bisection_eps=1e-4, single_mixture=True):
+                 bisection_eps=1e-4, single_mixture=True, normalizer=None):
         super(ConditionalNITS, self).__init__()
 
         self.d = d
@@ -473,6 +489,7 @@ class ConditionalNITS(nn.Module):
         self.softmax_temperature = softmax_temperature
         self.bisection_eps = bisection_eps
         self.single_mixture = single_mixture
+        self.normalizer = normalizer
 
         assert arch[0] == d or pixelrnn
         self.nits_list = torch.nn.ModuleList()
@@ -485,7 +502,8 @@ class ConditionalNITS(nn.Module):
                                   normalize_inverse=normalize_inverse,
                                   add_residual_connections=add_residual_connections,
                                   softmax_temperature=softmax_temperature,
-                                  bisection_eps=bisection_eps)
+                                  bisection_eps=bisection_eps,
+                                  normalizer=normalizer)
             self.nits_list.append(model)
 
         if pixelrnn and self.single_mixture:
@@ -574,6 +592,9 @@ class ConditionalNITS(nn.Module):
 
 if __name__ == "__main__":
     print("Beginning gradient unit test.")
+    
+    from nits.fc_model import Normalizer
+    
     n = 1000
     for arch in [[1, 10, 1], [1, 10, 10, 1]]:
         model = NITSPrimitive(arch=arch)
@@ -585,6 +606,22 @@ if __name__ == "__main__":
         func = lambda x_: model.forward_(x_, params)
         out2 = torch.autograd.functional.jacobian(func, x, vectorize=True)[:,0,:,0].diagonal()
         assert((out1 - out2).norm() < 1e-5)
+        
+    for d in [1]:
+        for normalizer in [None, Normalizer(d, d)]:
+            for arch in [[1, 10, 1], [1, 10, 10, 1]]:
+                model = NITS(d=d, arch=arch, normalizer=normalizer)
+                params = torch.randn((n, model.tot_params))
+                x = torch.randn((n, d))
+                if normalizer is not None:
+                    normalizer.set_weights(x, device='cpu')
+
+                out1 = model.backward_(x, params)
+
+                func = lambda x_: model.forward_(x_, params)
+                tmp = torch.autograd.functional.jacobian(func, x, vectorize=True)
+                out2 = torch.cat([tmp[:,i,:,i].diagonal().unsqueeze(-1) for i in range(d)], axis=1)
+                assert((out1 - out2).norm() < 1e-5)
 
     d = 3
     for pixelrnn in [True, False]:
@@ -601,3 +638,5 @@ if __name__ == "__main__":
             assert((out1 - out2).norm() < 1e-5)
 
     print("Gradient unit test complete. All tests passed!")
+
+
