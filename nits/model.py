@@ -9,25 +9,25 @@ class MonotonicInverse(torch.autograd.Function):
     @staticmethod
     def forward(ctx, params, z, search_func, f, b, idx):
         x = search_func(z, params)
-        
+
         ctx.save_for_backward(params, x)
         ctx.f = f
         ctx.b = b
-        
+
         return x[:, idx].unsqueeze(-1)
 
     @staticmethod
     def backward(ctx, grad_output):
         params, x = ctx.saved_tensors
-        
+
         with torch.enable_grad():
             params_ = params.detach().clone().requires_grad_(True)
             F = ctx.f(x, params_)
             F.backward(gradient=grad_output)
-        
+
         dzdx = ctx.b(x, params)
         grad = -params_.grad / (dzdx + 1e-6)
-                    
+
         return grad, 1 / dzdx * grad_output, None, None, None, None
 
 class NITSPrimitive(nn.Module):
@@ -36,7 +36,7 @@ class NITSPrimitive(nn.Module):
                  final_layer_constraint='softmax', non_conditional_dim=0,
                  add_residual_connections=False, pixelrnn=False,
                  softmax_temperature=True, normalize_inverse=True,
-                 bisection_eps=1e-6, normalizer=None):
+                 bisection_eps=1e-6):
         super(NITSPrimitive, self).__init__()
         self.arch = arch
         self.monotonic_const = monotonic_const
@@ -49,7 +49,6 @@ class NITSPrimitive(nn.Module):
         self.softmax_temperature = softmax_temperature
         self.normalize_inverse = normalize_inverse
         self.bisection_eps = bisection_eps
-        self.normalizer = normalizer
 
         # count parameters
         self.n_params = 0
@@ -122,20 +121,10 @@ class NITSPrimitive(nn.Module):
         As = []
         bs = []
         residuals = []
-        
+
         # the monotonic constant is only applied w.r.t. the first input dimension
         x = x.clone()
         prev_x = monotonic_x = x[:,self.non_conditional_dim].unsqueeze(-1)
-        
-        if self.normalizer is not None:
-#             x = self.normalizer(x)
-            idx = self.non_conditional_dim
-            x = self.normalizer.weight[
-            As.append(self.normalizer.weight)
-            bs.append(self.normalizer.bias)
-            pre_activations.append(x)
-            nonlinearities.append('linear')
-            residuals.append(False)
 
         if self.pixelrnn:
             cur_idx = 3 * self.arch[1]
@@ -235,11 +224,8 @@ class NITSPrimitive(nn.Module):
         elif activation == 'sigmoid':
             sig_act = pre_activation.sigmoid()
             grad = grad * sig_act * (1 - sig_act)
-        
-        if len(A.shape) == 2:
-            result = torch.einsum('ni,ij->nj', grad, A)
-        elif len(A.shape) == 3:
-            result = torch.einsum('ni,nij->nj', grad, A)
+
+        result = torch.einsum('ni,nij->nj', grad, A)
 
         if residual:
             result = result + orig_grad
@@ -321,7 +307,7 @@ class NITSPrimitive(nn.Module):
     def icdf(self, z, params, given_x=None):
         forward = self.cdf if self.normalize_inverse else self.forward_
         backward = self.pdf if self.normalize_inverse else self.backward_
-        
+
         search_func = lambda x0, x1: self.bisection_search(x0, x1, given_x=given_x, x_unrounded=None)
         return MonotonicInverse.apply(params, z, search_func, forward, backward, self.non_conditional_dim)
 #         return self.fpi(z, params, given_x, None)[:, self.non_conditional_dim].unsqueeze(-1)
@@ -351,14 +337,14 @@ class NITSPrimitive(nn.Module):
             x_hat = x_hat - (guess - y) / dfdx(x_hat)
             guess = f(x_hat)
             n_iters += 1
-            
+
         return x_hat
 
 class NITS(NITSPrimitive):
     def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax',
                  add_residual_connections=False, normalize_inverse=True,
-                 softmax_temperature=True, normalizer=None):
+                 softmax_temperature=True):
         super(NITS, self).__init__(arch, start, end,
                                            A_constraint=A_constraint,
                                            monotonic_const=monotonic_const,
@@ -366,10 +352,9 @@ class NITS(NITSPrimitive):
         self.d = d
         self.tot_params = self.n_params * d
         self.final_layer_constraint = final_layer_constraint
-        self.add_residual_connections=add_residual_connections
+        self.add_residual_connections = add_residual_connections
         self.normalize_inverse = normalize_inverse
         self.softmax_temperature = softmax_temperature
-        self.normalizer = normalizer
 
         self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
         self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
@@ -380,8 +365,7 @@ class NITS(NITSPrimitive):
                                   final_layer_constraint=final_layer_constraint,
                                   add_residual_connections=add_residual_connections,
                                   normalize_inverse=normalize_inverse,
-                                  softmax_temperature=softmax_temperature,
-                                  normalizer=normalizer)
+                                  softmax_temperature=softmax_temperature)
 
     def multidim_reshape(self, x, params):
         n = max(len(x), len(params))
@@ -473,7 +457,7 @@ class ConditionalNITS(nn.Module):
                  monotonic_const=1e-2, final_layer_constraint='softmax',
                  autoregressive=True, pixelrnn=False, normalize_inverse=True,
                  add_residual_connections=False, softmax_temperature=True,
-                 bisection_eps=1e-4, single_mixture=True, normalizer=None):
+                 bisection_eps=1e-4, single_mixture=True):
         super(ConditionalNITS, self).__init__()
 
         self.d = d
@@ -489,7 +473,6 @@ class ConditionalNITS(nn.Module):
         self.softmax_temperature = softmax_temperature
         self.bisection_eps = bisection_eps
         self.single_mixture = single_mixture
-        self.normalizer = normalizer
 
         assert arch[0] == d or pixelrnn
         self.nits_list = torch.nn.ModuleList()
@@ -502,8 +485,7 @@ class ConditionalNITS(nn.Module):
                                   normalize_inverse=normalize_inverse,
                                   add_residual_connections=add_residual_connections,
                                   softmax_temperature=softmax_temperature,
-                                  bisection_eps=bisection_eps,
-                                  normalizer=normalizer)
+                                  bisection_eps=bisection_eps)
             self.nits_list.append(model)
 
         if pixelrnn and self.single_mixture:
@@ -591,52 +573,154 @@ class ConditionalNITS(nn.Module):
 
 
 if __name__ == "__main__":
-    print("Beginning gradient unit test.")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-g', '--gpu', type=str, default='')
+    args = parser.parse_args()
+    device = 'cuda:' + args.gpu if args.gpu else 'cpu'
     
-    from nits.fc_model import Normalizer
+    print("Beginning unit test.")
     
+    print("Testing gradients.")
+
     n = 1000
+    start, end = -2., 2.
+    
     for arch in [[1, 10, 1], [1, 10, 10, 1]]:
-        model = NITSPrimitive(arch=arch)
-        params = torch.randn((n, model.n_params))
-        x = torch.randn((n, 1))
+        model = NITSPrimitive(arch=arch, start=start, end=end)
+        params = torch.randn((n, model.n_params), device=device)
+        x = torch.randn((n, 1), device=device)
 
         out1 = model.backward_(x, params).reshape(-1)
 
         func = lambda x_: model.forward_(x_, params)
         out2 = torch.autograd.functional.jacobian(func, x, vectorize=True)[:,0,:,0].diagonal()
         assert((out1 - out2).norm() < 1e-5)
-        
-    for d in [1]:
-        for normalizer in [None, Normalizer(d, d)]:
-            for arch in [[1, 10, 1], [1, 10, 10, 1]]:
-                model = NITS(d=d, arch=arch, normalizer=normalizer)
-                params = torch.randn((n, model.tot_params))
-                x = torch.randn((n, d))
-                if normalizer is not None:
-                    normalizer.set_weights(x, device='cpu')
 
-                out1 = model.backward_(x, params)
+    for d in [1, 5]:
+        for arch in [[1, 10, 1], [1, 10, 10, 1]]:
+            model = NITS(d=d, arch=arch, start=start, end=end)
+            params = torch.randn((n, model.tot_params), device=device)
+            x = torch.randn((n, d), device=device)
 
-                func = lambda x_: model.forward_(x_, params)
-                tmp = torch.autograd.functional.jacobian(func, x, vectorize=True)
-                out2 = torch.cat([tmp[:,i,:,i].diagonal().unsqueeze(-1) for i in range(d)], axis=1)
-                assert((out1 - out2).norm() < 1e-5)
+            out1 = model.backward_(x, params)
+
+            func = lambda x_: model.forward_(x_, params)
+            tmp = torch.autograd.functional.jacobian(func, x, vectorize=True)
+            out2 = torch.cat([tmp[:,i,:,i].diagonal().unsqueeze(-1) for i in range(d)], axis=1)
+            assert((out1 - out2).norm() < 1e-5)
+            
+            # check that the function integrates to 1
+            assert torch.allclose(torch.ones((n, d)).to(device),
+                                  model.cdf(model.end, params) - model.cdf(model.start, params), atol=1e-5)
+
+            # check that the pdf is all positive
+            z = torch.linspace(start, end, steps=n, device=device)[:,None].tile((1, d))
+            assert (model.pdf(z, params) >= 0).all()
+
+            # check that the cdf is the inverse of the inverted cdf
+            cdf = model.cdf(z, params[0:1])
+            icdf = model.icdf(cdf, params[0:1])
+            assert (z - icdf <= 1e-3).all()
 
     d = 3
     for pixelrnn in [True, False]:
         for base_arch in [[10, 1], [10, 10, 1]]:
             arch = [1] + base_arch if pixelrnn else [d] + base_arch
-            model = ConditionalNITS(d=d, arch=arch, pixelrnn=pixelrnn)
-            params = torch.randn((n, model.tot_params))
-            x = torch.randn((n, d))
+            model = ConditionalNITS(d=d, arch=arch, pixelrnn=pixelrnn, start=start, end=end)
+            params = torch.randn((n, model.tot_params), device=device)
+            x = torch.randn((n, d), device=device)
 
             out1 = model.backward_(x, params)
 
             func = lambda x_: model.forward_(x_, params)
             out2 = torch.autograd.functional.jacobian(func, x, vectorize=True).permute(0,2,1,3).diagonal().diagonal()
             assert((out1 - out2).norm() < 1e-5)
+            
+            
+    from nits.discretized_mol import discretized_mix_logistic_loss, discretized_mix_logistic_loss_1d
+    from nits.cnn_model import cnn_nits_loss
 
-    print("Gradient unit test complete. All tests passed!")
+    print("Testing single-channel NITS-Conv.")
+
+    model = NITS(
+        d=1, start=-1e5, end=1e5, arch=[1, 10, 1],
+        monotonic_const=0., A_constraint='neg_exp',
+        final_layer_constraint='softmax', 
+        softmax_temperature=False).to(device)
+    params = torch.randn((n, model.tot_params, 1, 1))
+    z = torch.randn((n, 1, 1, 1))
+
+    loss1 = discretized_mix_logistic_loss_1d(z, params)
+    loss2 = cnn_nits_loss(z, params, nits_model=model, discretized=True)
+
+    assert (loss1 - loss2).norm() < 1e-2, (loss1 - loss2).norm()
+
+    model = NITS(
+        d=1, start=-1e5, end=1e5, arch=[1, 10, 1],
+        monotonic_const=0., A_constraint='neg_exp',
+        final_layer_constraint='softmax', 
+        softmax_temperature=False).to(device)
+    params = torch.randn((n, model.tot_params, 2, 2))
+    z = torch.randn((n, 1, 2, 2))
+
+    loss1 = discretized_mix_logistic_loss_1d(z, params)
+    loss2 = cnn_nits_loss(z, params, nits_model=model, discretized=True)
+
+    assert (loss1 - loss2).norm() < 1e-2, (loss1 - loss2).norm()
+
+    print("Testing multi-channel NITS-Conv.")
+
+    start, end = -2., 2.
+    batch_size = 1024
+
+    c_model = ConditionalNITS(d=3, start=start, end=end, arch=[1, 10, 1],
+                              monotonic_const=0.,
+                              autoregressive=True, 
+                              pixelrnn=True, 
+                              normalize_inverse=False,
+                              softmax_temperature=False).to(device)
+
+    c_params = torch.randn(batch_size, c_model.tot_params, 2, 2, device=device)
+    z = torch.rand(batch_size, 3, 2, 2, device=device) * 2 - 1
+
+    # make sure outputs align with pixelrnn
+    loss1 = discretized_mix_logistic_loss(z, c_params, bad_loss=True)
+    loss2 = cnn_nits_loss(z, c_params, c_model, discretized=True)
+
+    dist_per_dim = (loss1 - loss2).abs() / np.prod(z.shape)
+
+    assert dist_per_dim < 1e-5, dist_per_dim
+
+    # make sure that cdf and icdf return the correct result
+    c_params = torch.randn(batch_size, c_model.tot_params, device=device)
+    z = torch.rand(batch_size, 3, device=device) * 2 - 1
+    cdf_ = c_model.forward_(z, c_params)
+    icdf_ = c_model.icdf(cdf_, c_params)
+
+    assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
+    assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
+    assert (z - icdf_).abs().max() < 1e-2
+
+
+    # test icdf, when normalize_inverse == True (i.e. not EXACTLY pixelrnn anymore)
+    c_model = ConditionalNITS(d=3, start=start, end=end, arch=[1, 10, 1],
+                              monotonic_const=0.,
+                              autoregressive=True, pixelrnn=True, 
+                              normalize_inverse=True).to(device)
+
+    # make sure that cdf and icdf return the correct result
+    c_params = torch.randn(batch_size, c_model.tot_params, device=device)
+    z = torch.rand(batch_size, 3, device=device) * 2 - 1
+    cdf_ = c_model.cdf(z, c_params)
+    icdf_ = c_model.icdf(cdf_, c_params)
+
+    assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
+    assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
+    assert (z - icdf_).abs().max() < 1e-1
+
+    print("All tests passed!")
+
+    print("Unit test complete. All tests passed!")
 
 

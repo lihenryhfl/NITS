@@ -44,7 +44,7 @@ for A_constraint in ['neg_exp', 'exp']:
         z = torch.linspace(start, end, steps=n, device=device)[:,None].tile((1, d))
         assert (model.pdf(z, params) >= 0).all()
 
-        # check that the cdf is the inverted
+        # check that the cdf is the inverse of the inverted cdf
         cdf = model.cdf(z, params[0:1])
         icdf = model.icdf(cdf, params[0:1])
         assert (z - icdf <= 1e-3).all()

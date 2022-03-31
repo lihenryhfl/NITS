@@ -20,7 +20,7 @@ def list_str_to_list(s):
     s = [int(x) for x in s]
 
     return s
-    
+
 def create_batcher(x, batch_size=1):
     idx = 0
     p = torch.randperm(len(x))
@@ -31,8 +31,8 @@ def create_batcher(x, batch_size=1):
         idx += batch_size
     else:
         yield torch.tensor(x[idx:], device=device)
-        
-        
+
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument('-d', '--dataset', type=str, default='gas')
@@ -41,6 +41,7 @@ parser.add_argument('-b', '--batch_size', type=int, default=512)
 parser.add_argument('-hi', '--hidden_dim', type=int, default=512)
 parser.add_argument('-nr', '--n_residual_blocks', type=int, default=4)
 parser.add_argument('-ga', '--gamma', type=float, default=1 - 5e-7)
+parser.add_argument('-pd', '--polyak_decay', type=float, default=1 - 5e-4)
 parser.add_argument('-a', '--nits_arch', type=list_str_to_list, default='[16,16,1]')
 parser.add_argument('-r', '--rotate', type=bool, default=False)
 parser.add_argument('-rc', '--add_residual_connections', type=bool, default=False)
@@ -52,7 +53,6 @@ device = 'cuda:' + args.gpu if args.gpu else 'cpu'
 print(args)
 
 lr = 5e-4
-polyak_decay = 0.9995
 use_batch_norm = False
 zero_initialization = True
 weight_norm = False
@@ -90,8 +90,8 @@ nits_model = NITS(d=d, start=min_val, end=max_val, monotonic_const=1e-5,
                   softmax_temperature=False).to(device)
 
 model = ResMADEModel(
-    d=d, 
-    rotate=args.rotate, 
+    d=d,
+    rotate=args.rotate,
     nits_model=nits_model,
     n_residual_blocks=args.n_residual_blocks,
     hidden_dim=args.hidden_dim,
@@ -102,8 +102,8 @@ model = ResMADEModel(
 ).to(device)
 
 shadow = ResMADEModel(
-    d=d, 
-    rotate=args.rotate, 
+    d=d,
+    rotate=args.rotate,
     nits_model=nits_model,
     n_residual_blocks=args.n_residual_blocks,
     hidden_dim=args.hidden_dim,
@@ -119,10 +119,10 @@ if weight_norm:
         for i, x in enumerate(create_batcher(data.trn.x, batch_size=args.batch_size)):
             params = model(x)
             break
-    
-model = EMA(model, shadow, decay=polyak_decay).to(device)
 
-max_iters = 1000000
+model = EMA(model, shadow, decay=args.polyak_decay).to(device)
+
+max_iters = 2000000
 print_every = 10
 optim = torch.optim.Adam(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optim, step_size=1, gamma=args.gamma)
@@ -143,7 +143,7 @@ while iters < max_iters:
         scheduler.step()
         model.update()
         iters += 1
-        
+
     epoch += 1
 
     if (epoch + 1) % print_every == 0:
@@ -160,7 +160,7 @@ while iters < max_iters:
                 val_ll += ll.detach().cpu().numpy()
 
             val_ll /= len(data.val.x)
-            
+
         with torch.no_grad():
             model.eval()
             test_ll = 0.
@@ -170,7 +170,7 @@ while iters < max_iters:
                 test_ll += ll.detach().cpu().numpy()
 
             test_ll /= len(data.tst.x)
-            
+
         fmt_str1 = 'epoch: {:4d}, time: {:.2f}, train_ll: {:.4f},'
         fmt_str2 = ' val_ll: {:.4f}, test_ll: {:.4f}, lr: {:.4e}'
 
@@ -184,6 +184,6 @@ while iters < max_iters:
 
         time_ = time.time()
         train_ll = 0.
-    
+
     if (epoch + 1) % (print_every * 10) == 0:
         print(args)

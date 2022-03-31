@@ -102,9 +102,11 @@ class RotationParamModel(nn.Module):
 
         return data
     
-class Normalizer(nn.Linear):
+class Normalizer(nn.Module):
     def __init__(self, in_features, out_features, bias=True):
-        super(Normalizer, self).__init__(in_features=in_features, out_features=out_features, bias=bias)
+        super(Normalizer, self).__init__()
+        self.weight_diag = nn.Parameter(torch.zeros(size=(d,)), requires_grad=False)
+        self.bias = nn.Parameter(torch.zeros(size=(d,)), requires_grad=False)
         self.register_buffer("weights_set", torch.tensor(False).bool())
         self.d = in_features
         
@@ -112,16 +114,14 @@ class Normalizer(nn.Linear):
         assert x.device == torch.device('cpu')
         m, v = x.mean(dim=(0,)), x.var(dim=(0,))
         self.bias.data = -m
-        self.weight.data = torch.diag(1 / (v + 1e-8).sqrt())
-        self.weight.requires_grad = False
-        self.bias.requires_grad = False
+        self.weight_diag.data = 1 / (v + 1e-8).sqrt()
         self.weights_set.data = torch.tensor(True).bool().to(self.weights_set.device)
 
     def forward(self, x):
         if not self.weights_set:
             raise Exception("Need to set weights first!")
             
-        return F.linear(x, self.weight, self.bias)
+        return self.weight_diag * x + self.bias
     
 class ResMADEModel(nn.Module):
     def __init__(self, d, nits_model, n_residual_blocks=4, hidden_dim=512, 
