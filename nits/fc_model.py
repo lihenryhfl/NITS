@@ -103,10 +103,11 @@ class RotationParamModel(nn.Module):
         return data
     
 class Normalizer(nn.Module):
-    def __init__(self, in_features, out_features, bias=True):
+    def __init__(self, in_features, out_features, bias=True, trainable=True):
         super(Normalizer, self).__init__()
-        self.weight_diag = nn.Parameter(torch.zeros(size=(d,)), requires_grad=False)
-        self.bias = nn.Parameter(torch.zeros(size=(d,)), requires_grad=False)
+        assert in_features == out_features
+        self.weight_diag = nn.Parameter(torch.zeros(size=(in_features,)), requires_grad=trainable)
+        self.bias = nn.Parameter(torch.zeros(size=(in_features,)), requires_grad=trainable)
         self.register_buffer("weights_set", torch.tensor(False).bool())
         self.d = in_features
         
@@ -127,12 +128,15 @@ class ResMADEModel(nn.Module):
     def __init__(self, d, nits_model, n_residual_blocks=4, hidden_dim=512, 
                  dropout_probability=0., use_batch_norm=False, 
                  zero_initialization=True, weight_norm=False,
-                 rotate=True, normalizer=None):
+                 rotate=False, use_normalizer=False):
         super(ResMADEModel, self).__init__()
         self.d = d
         self.n_params = nits_model.n_params
         self.nits_model = nits_model
-        self.normalizer = normalizer
+        
+        if use_normalizer:
+            assert not rotate
+            self.normalizer = Normalizer(d, d)
         
         self.mlp = ResidualMADE(
             input_dim=self.d,
@@ -160,15 +164,29 @@ class ResMADEModel(nn.Module):
             P = P.T
         
         return x.mm(P)
+    
+    def add_normalizer_weights(self, params):
+        idx = torch.arange(self.d).reshape(1, -1)
+        idx = idx.tile(len(params), 1).reshape(-1)
+        A = self.normalizer.weight_diag[idx].reshape(-1, self.d, 1)
+        b = self.normalizer.bias[idx].reshape(-1, self.d, 1)
+        
+        reshaped_params = params.reshape(-1, self.d, self.nits_model.n_params)
+        new_params = torch.cat([A, b, reshaped_params[:,:,2:]], axis=2)
+        return new_params.reshape(-1, self.nits_model.tot_params)
         
     def forward(self, x):
+        if hasattr(self, 'normalizer'):
+            x = self.normalizer(x)
+        
         # rotate x
         x = self.proj(x)
         
         # obtain parameters
-        if self.normalizer is not None:
-            x = self.normalizer(x)
         params = self.mlp(x)
+        
+        if hasattr(self, 'normalizer'):
+            params = self.add_normalizer_weights(params)
         
         # compute log likelihood
         ll = (self.nits_model.pdf(x, params) + 1e-10).log().sum()
@@ -181,7 +199,7 @@ class ResMADEModel(nn.Module):
 
             for i in range(self.d):
                 # rotate x
-#                 x_proj = self.proj(data)
+                x_proj = self.proj(data)
 
                 # obtain parameters
                 params = self.mlp(data)

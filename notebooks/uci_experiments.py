@@ -37,45 +37,56 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('-d', '--dataset', type=str, default='gas')
 parser.add_argument('-g', '--gpu', type=str, default='')
-parser.add_argument('-b', '--batch_size', type=int, default=512)
+parser.add_argument('-b', '--batch_size', type=int, default=1024)
 parser.add_argument('-hi', '--hidden_dim', type=int, default=512)
 parser.add_argument('-nr', '--n_residual_blocks', type=int, default=4)
+parser.add_argument('-n', '--n_iters', type=int, default=-1)
 parser.add_argument('-ga', '--gamma', type=float, default=1 - 5e-7)
-parser.add_argument('-pd', '--polyak_decay', type=float, default=1 - 5e-4)
+parser.add_argument('-pd', '--polyak_decay', type=float, default=1 - 5e-5)
 parser.add_argument('-a', '--nits_arch', type=list_str_to_list, default='[16,16,1]')
 parser.add_argument('-r', '--rotate', type=bool, default=False)
+parser.add_argument('-dn', '--dont_normalize_inverse', type=bool, default=False)
+parser.add_argument('-l', '--learning_rate', type=float, default=5e-4)
+parser.add_argument('-p', '--dropout', type=float, default=-1.0)
 parser.add_argument('-rc', '--add_residual_connections', type=bool, default=False)
+parser.add_argument('-bm', '--bound_multiplier', type=float, default=1.0)
 
 args = parser.parse_args()
 
 device = 'cuda:' + args.gpu if args.gpu else 'cpu'
 
-print(args)
-
-lr = 5e-4
 use_batch_norm = False
 zero_initialization = True
 weight_norm = False
 if args.dataset == 'gas':
     # training set size: 852,174
     data = gas.GAS()
-    dropout_probability = 0.1
+    default_dropout = 0.1
+    default_n_iters = 2000000
 elif args.dataset == 'power':
     # training set size: 1,659,917
     data = power.POWER()
-    dropout_probability = 0.1
+    default_dropout = 0.1
+    default_n_iters = 2000000
 elif args.dataset == 'miniboone':
     # training set size: 29,556
     data = miniboone.MINIBOONE()
-    dropout_probability = 0.5
+    default_dropout = 0.5
+    default_n_iters = 2000000
 elif args.dataset == 'hepmass':
     # training set size: 315,123
     data = hepmass.HEPMASS()
-    dropout_probability = 0.5
+    default_dropout = 0.5
+    default_n_iters = 2000000
 elif args.dataset == 'bsds300':
     # training set size: 1,000,000
     data = bsds300.BSDS300()
-    dropout_probability = 0.2
+    default_dropout = 0.2
+    default_n_iters = 2000000
+
+args.n_iters = args.n_iters if args.n_iters >= 0 else default_n_iters
+args.dropout = args.dropout if args.dropout >= 0.0 else default_dropout
+print(args)
 
 d = data.trn.x.shape[1]
 
@@ -83,10 +94,14 @@ max_val = max(data.trn.x.max(), data.val.x.max(), data.tst.x.max())
 min_val = min(data.trn.x.min(), data.val.x.min(), data.tst.x.min())
 max_val, min_val = torch.tensor(max_val).to(device).float(), torch.tensor(min_val).to(device).float()
 
+max_val *= args.bound_multiplier
+min_val *= args.bound_multiplier
+
 nits_model = NITS(d=d, start=min_val, end=max_val, monotonic_const=1e-5,
                   A_constraint='neg_exp', arch=[1] + args.nits_arch,
                   final_layer_constraint='softmax',
                   add_residual_connections=args.add_residual_connections,
+                  normalize_inverse=(not args.dont_normalize_inverse),
                   softmax_temperature=False).to(device)
 
 model = ResMADEModel(
@@ -95,7 +110,7 @@ model = ResMADEModel(
     nits_model=nits_model,
     n_residual_blocks=args.n_residual_blocks,
     hidden_dim=args.hidden_dim,
-    dropout_probability=dropout_probability,
+    dropout_probability=args.dropout,
     use_batch_norm=use_batch_norm,
     zero_initialization=zero_initialization,
     weight_norm=weight_norm
@@ -107,7 +122,7 @@ shadow = ResMADEModel(
     nits_model=nits_model,
     n_residual_blocks=args.n_residual_blocks,
     hidden_dim=args.hidden_dim,
-    dropout_probability=dropout_probability,
+    dropout_probability=args.dropout,
     use_batch_norm=use_batch_norm,
     zero_initialization=zero_initialization,
     weight_norm=weight_norm
@@ -122,9 +137,9 @@ if weight_norm:
 
 model = EMA(model, shadow, decay=args.polyak_decay).to(device)
 
-max_iters = 2000000
+max_iters = args.n_iters
 print_every = 10
-optim = torch.optim.Adam(model.parameters(), lr=lr)
+optim = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 scheduler = torch.optim.lr_scheduler.StepLR(optim, step_size=1, gamma=args.gamma)
 
 time_ = time.time()
