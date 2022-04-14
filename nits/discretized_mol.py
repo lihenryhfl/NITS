@@ -101,7 +101,7 @@ def sample_from_discretized_mix_logistic_1d(l, nr_mix):
     out = x0.unsqueeze(1)
     return out
 
-def discretized_mix_logistic_loss(x, l, bad_loss=False):
+def mix_logistic_loss(x, l, bad_loss=False, discretize=True, dequantize=True):
     """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
     # Pytorch ordering
     x = x.permute(0, 2, 3, 1)
@@ -129,38 +129,47 @@ def discretized_mix_logistic_loss(x, l, bad_loss=False):
 
     means = torch.cat((means[:, :, :, 0, :].unsqueeze(3), m2, m3), dim=3)
 
-    x_plus = (x * 127.5 + .5).round() / 127.5
-    x_min = (x * 127.5 - .5).round() / 127.5
-    inv_stdv = torch.exp(-log_scales)
-    plus_in = inv_stdv * (x_plus - means)
-    cdf_plus = plus_in.sigmoid().clamp(max=1-1e-7, min=1e-7)
-    min_in = inv_stdv * (x_min - means)
-    cdf_min = min_in.sigmoid().clamp(max=1-1e-7, min=1e-7)
-    # log probability for edge case of 0 (before scaling)
-    log_cdf_plus = (cdf_plus).log()
-    # log probability for edge case of 255 (before scaling)
-    log_one_minus_cdf_min = (1 - cdf_min).log()
-    cdf_delta = cdf_plus - cdf_min  # probability for all other cases
-    mid_in = inv_stdv * (x - means)
-    # log probability in the center of the bin, to be used in extreme cases
-    # (not actually used in our code)
-    log_pdf_mid = mid_in - log_scales - 2. * F.softplus(mid_in)
+    if discretized:
+        x_plus = (x * 127.5 + .5).round() / 127.5
+        x_min = (x * 127.5 - .5).round() / 127.5
+        inv_stdv = torch.exp(-log_scales)
+        plus_in = inv_stdv * (x_plus - means)
+        cdf_plus = plus_in.sigmoid().clamp(max=1-1e-7, min=1e-7)
+        min_in = inv_stdv * (x_min - means)
+        cdf_min = min_in.sigmoid().clamp(max=1-1e-7, min=1e-7)
+        # log probability for edge case of 0 (before scaling)
+        log_cdf_plus = (cdf_plus).log()
+        # log probability for edge case of 255 (before scaling)
+        log_one_minus_cdf_min = (1 - cdf_min).log()
+        cdf_delta = cdf_plus - cdf_min  # probability for all other cases
+        mid_in = inv_stdv * (x - means)
+        # log probability in the center of the bin, to be used in extreme cases
+        # (not actually used in our code)
+        log_pdf_mid = mid_in - log_scales - 2. * F.softplus(mid_in)
 
-    combine = lambda x_: (log_prob_from_logits(logit_probs).unsqueeze(3).exp() * x_.exp()).sum(-1).log()
+        combine = lambda x_: (log_prob_from_logits(logit_probs).unsqueeze(3).exp() * x_.exp()).sum(-1).log()
 
-    inner_inner_cond = (cdf_delta > 1e-5).float()
-    inner_inner_out  = inner_inner_cond * torch.log(torch.clamp(cdf_delta, min=1e-12)) + (1. - inner_inner_cond) * (log_pdf_mid - np.log(127.5))
-    inner_cond       = (x > 0.999).float()
-    inner_out        = inner_cond * log_one_minus_cdf_min + (1. - inner_cond) * inner_inner_out
-    cond             = (x < -0.999).float()
-    log_probs        = cond * log_cdf_plus + (1. - cond) * inner_out
+        inner_inner_cond = (cdf_delta > 1e-5).float()
+        inner_inner_out  = inner_inner_cond * torch.log(torch.clamp(cdf_delta, min=1e-12)) + (1. - inner_inner_cond) * (log_pdf_mid - np.log(127.5))
+        inner_cond       = (x > 0.999).float()
+        inner_out        = inner_cond * log_one_minus_cdf_min + (1. - inner_cond) * inner_inner_out
+        cond             = (x < -0.999).float()
+        log_probs        = cond * log_cdf_plus + (1. - cond) * inner_out
+    else:
+        if dequantize:
+            # add dequantization noise:
+            x = x + (torch.rand(x.shape, device=x.device) - 0.5) / 127.5
+        mid_in           = inv_stdv * (x - means)
+        log_pdf_mid      = mid_in - log_scales - 2. * F.softplus(mid_in)
+        log_probs        = log_pdf_mid * log_cdf_plus + (1. - cond) * inner_out
+
 
     if bad_loss:
         return -torch.sum(combine(log_probs))
     else:
         log_probs        = torch.sum(log_probs, dim=3) + log_prob_from_logits(logit_probs)
         return -torch.sum(log_sum_exp(log_probs))
-    
+
 def to_one_hot(tensor, n, fill_with=1.):
     # we perform one hot encore with respect to the last axis
     one_hot = torch.FloatTensor(tensor.size() + (n,)).zero_()
@@ -168,7 +177,7 @@ def to_one_hot(tensor, n, fill_with=1.):
     one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
     return Variable(one_hot)
 
-def sample_from_discretized_mix_logistic(l, nr_mix, bad_loss=False, quantize=False):
+def sample_from_mix_logistic(l, nr_mix, bad_loss=False, quantize=False):
     # Pytorch ordering
     l = l.permute(0, 2, 3, 1)
     ls = [int(y) for y in l.size()]
@@ -205,10 +214,10 @@ def sample_from_discretized_mix_logistic(l, nr_mix, bad_loss=False, quantize=Fal
     out = torch.cat([x0.view(xs[:-1] + [1]), x1.view(xs[:-1] + [1]), x2.view(xs[:-1] + [1])], dim=3)
     # put back in Pytorch ordering
     out = out.permute(0, 3, 1, 2)
-    
+
     if quantize:
         out = ((out + 1) * 127.5).round() / 127.5 - 1
-        
+
     return out
 
 def our_mol_loss(x, l):
@@ -304,8 +313,8 @@ def our_mol_sample(l, nr_mix, quantize=False):
     out = torch.cat([x0.view(xs[:-1] + [1]), x1.view(xs[:-1] + [1]), x2.view(xs[:-1] + [1])], dim=3)
     # put back in Pytorch ordering
     out = out.permute(0, 3, 1, 2)
-    
+
     if quantize:
         out = ((out + 1) * 127.5).round() / 127.5 - 1
-    
+
     return out

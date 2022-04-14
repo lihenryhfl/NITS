@@ -152,13 +152,17 @@ class ResMADEModel(nn.Module):
         self.rotate = rotate
         if rotate:
             self.A = nn.Parameter(torch.randn(self.d, self.d))
+            
+    def get_P(self):
+        P, _ = torch.linalg.qr(self.A)
+        
+        return P
         
     def proj(self, x, transpose=False):
         if not self.rotate:
             return x
         
-        Q, R = torch.linalg.qr(self.A)
-        P = Q.to(x.device)
+        P = self.get_P()
         
         if transpose:
             P = P.T

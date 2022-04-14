@@ -40,13 +40,13 @@ parser.add_argument('-g', '--gpu', type=str, default='')
 parser.add_argument('-b', '--batch_size', type=int, default=1024)
 parser.add_argument('-hi', '--hidden_dim', type=int, default=512)
 parser.add_argument('-nr', '--n_residual_blocks', type=int, default=4)
-parser.add_argument('-n', '--n_iters', type=int, default=-1)
-parser.add_argument('-ga', '--gamma', type=float, default=1 - 5e-7)
+parser.add_argument('-n', '--patience', type=int, default=-1)
+parser.add_argument('-ga', '--gamma', type=float, default=1)
 parser.add_argument('-pd', '--polyak_decay', type=float, default=1 - 5e-5)
 parser.add_argument('-a', '--nits_arch', type=list_str_to_list, default='[16,16,1]')
-parser.add_argument('-r', '--rotate', type=bool, default=False)
+parser.add_argument('-r', '--rotate', action='store_true')
 parser.add_argument('-dn', '--dont_normalize_inverse', type=bool, default=False)
-parser.add_argument('-l', '--learning_rate', type=float, default=5e-4)
+parser.add_argument('-l', '--learning_rate', type=float, default=2e-4)
 parser.add_argument('-p', '--dropout', type=float, default=-1.0)
 parser.add_argument('-rc', '--add_residual_connections', type=bool, default=False)
 parser.add_argument('-bm', '--bound_multiplier', type=float, default=1.0)
@@ -58,33 +58,30 @@ device = 'cuda:' + args.gpu if args.gpu else 'cpu'
 use_batch_norm = False
 zero_initialization = True
 weight_norm = False
+default_patience = 10
 if args.dataset == 'gas':
     # training set size: 852,174
     data = gas.GAS()
     default_dropout = 0.1
-    default_n_iters = 2000000
 elif args.dataset == 'power':
     # training set size: 1,659,917
     data = power.POWER()
     default_dropout = 0.1
-    default_n_iters = 2000000
 elif args.dataset == 'miniboone':
     # training set size: 29,556
     data = miniboone.MINIBOONE()
-    default_dropout = 0.5
-    default_n_iters = 2000000
+    default_dropout = 0.3
 elif args.dataset == 'hepmass':
     # training set size: 315,123
     data = hepmass.HEPMASS()
     default_dropout = 0.5
-    default_n_iters = 2000000
+    default_pateince = 3
 elif args.dataset == 'bsds300':
     # training set size: 1,000,000
     data = bsds300.BSDS300()
     default_dropout = 0.2
-    default_n_iters = 2000000
 
-args.n_iters = args.n_iters if args.n_iters >= 0 else default_n_iters
+args.patience = args.patience if args.patience >= 0 else default_patience
 args.dropout = args.dropout if args.dropout >= 0.0 else default_dropout
 print(args)
 
@@ -137,16 +134,17 @@ if weight_norm:
 
 model = EMA(model, shadow, decay=args.polyak_decay).to(device)
 
-max_iters = args.n_iters
-print_every = 10
+print_every = 10 if args.dataset != 'miniboone' else 1
 optim = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 scheduler = torch.optim.lr_scheduler.StepLR(optim, step_size=1, gamma=args.gamma)
 
 time_ = time.time()
 epoch = 0
-iters = 0
 train_ll = 0.
-while iters < max_iters:
+max_val_ll = -np.inf
+patience = args.patience
+keep_training = True
+while keep_training:
     model.train()
     for i, x in enumerate(create_batcher(data.trn.x, batch_size=args.batch_size)):
         ll = model(x)
@@ -157,11 +155,10 @@ while iters < max_iters:
         optim.step()
         scheduler.step()
         model.update()
-        iters += 1
 
     epoch += 1
 
-    if (epoch + 1) % print_every == 0:
+    if epoch % print_every == 0:
         # compute train loss
         train_ll /= len(data.trn.x) * print_every
         lr = optim.param_groups[0]['lr']
@@ -169,30 +166,48 @@ while iters < max_iters:
         with torch.no_grad():
             model.eval()
             val_ll = 0.
+            ema_val_ll = 0.
             for i, x in enumerate(create_batcher(data.val.x, batch_size=args.batch_size)):
                 x = torch.tensor(x, device=device)
-                ll = model(x)
-                val_ll += ll.detach().cpu().numpy()
+                val_ll += model.model(x).detach().cpu().numpy()
+                ema_val_ll += model(x).detach().cpu().numpy()
 
             val_ll /= len(data.val.x)
+            ema_val_ll /= len(data.val.x)
+
+        # early stopping
+        if ema_val_ll > max_val_ll + 1e-4:
+            patience = args.patience
+            max_val_ll = ema_val_ll
+        else:
+            patience -= 1
+
+        if patience == 0:
+            print("Patience reached zero. max_val_ll stayed at {:.3f} for {:d} iterations.".format(max_val_ll, args.patience))
+            keep_training = False
 
         with torch.no_grad():
             model.eval()
             test_ll = 0.
+            ema_test_ll = 0.
             for i, x in enumerate(create_batcher(data.tst.x, batch_size=args.batch_size)):
                 x = torch.tensor(x, device=device)
-                ll = model(x)
-                test_ll += ll.detach().cpu().numpy()
+                test_ll += model.model(x).detach().cpu().numpy()
+                ema_test_ll += model(x).detach().cpu().numpy()
 
             test_ll /= len(data.tst.x)
+            ema_test_ll /= len(data.tst.x)
 
-        fmt_str1 = 'epoch: {:4d}, time: {:.2f}, train_ll: {:.4f},'
-        fmt_str2 = ' val_ll: {:.4f}, test_ll: {:.4f}, lr: {:.4e}'
+        fmt_str1 = 'epoch: {:3d}, time: {:3d}s, train_ll: {:.3f},'
+        fmt_str2 = ' ema_val_ll: {:.3f}, ema_test_ll: {:.3f},'
+        fmt_str3 = ' val_ll: {:.3f}, test_ll: {:.3f}, lr: {:.2e}'
 
-        print((fmt_str1 + fmt_str2).format(
-            epoch + 1,
-            time.time() - time_,
+        print((fmt_str1 + fmt_str2 + fmt_str3).format(
+            epoch,
+            int(time.time() - time_),
             train_ll,
+            ema_val_ll,
+            ema_test_ll,
             val_ll,
             test_ll,
             lr))
@@ -200,5 +215,5 @@ while iters < max_iters:
         time_ = time.time()
         train_ll = 0.
 
-    if (epoch + 1) % (print_every * 10) == 0:
+    if epoch % (print_every * 10) == 0:
         print(args)

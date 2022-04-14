@@ -10,8 +10,8 @@ from torchvision import datasets, transforms, utils
 from PIL import Image
 from nits.model import ConditionalNITS
 from nits.cnn_model import *
-from nits.discretized_mol import discretized_mix_logistic_loss as unstable_pixelcnn_loss
-from nits.discretized_mol import sample_from_discretized_mix_logistic as unstable_pixelcnn_sample
+from nits.discretized_mol import mix_logistic_loss as unstable_pixelcnn_loss
+from nits.discretized_mol import sample_from_mix_logistic as unstable_pixelcnn_sample
 
 def list_str_to_list(s):
     print(s)
@@ -29,7 +29,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-g', '--gpus', type=str,
                     default='', help='GPU to use')
 parser.add_argument('-i', '--data_dir', type=str,
-                    default='data', help='Location for the dataset')
+                    default='/data/datasets/', help='Location for the dataset')
 parser.add_argument('-o', '--save_dir', type=str, default='models',
                     help='Location for parameter checkpoints and samples')
 parser.add_argument('-d', '--dataset', type=str,
@@ -59,7 +59,7 @@ parser.add_argument('-s', '--seed', type=int, default=1,
                     help='Random seed to use')
 parser.add_argument('-ds', '--discretized', type=bool, default=False,
                     help='Discretized model')
-parser.add_argument('-ns', '--nits', type=bool, default=True,
+parser.add_argument('-ns', '--no_nits', action='store_true',
                     help='nits model')
 parser.add_argument('-at', '--attention', type=str, default='',
                     help='Attention-based NITS')
@@ -101,7 +101,7 @@ arch_string = str(args.nits_arch).replace(' ', '').replace(',', '_')[1:-1]
 stepweight_string = str(args.step_weights).replace(' ', '').replace(',', '_')[1:-1]
 
 model_name = 'nits{}_discretized{}_dequantize{}_attention{}_bseps{}_arch{}_stepweights{}_background{}_ae{:.0E}_ni{}{}'.format(
-    args.nits, args.discretized, args.dequantize, args.attention,
+    not args.no_nits, args.discretized, args.dequantize, args.attention,
     args.bisection_eps, arch_string, stepweight_string, args.background,
     args.autoencoder_weight, args.normalize_inverse, args.extra_string)
 print('model_name:', model_name)
@@ -111,20 +111,32 @@ sample_batch_size = 25
 rescaling     = lambda x : (x - .5) * 2.
 rescaling_inv = lambda x : .5 * x  + .5
 kwargs = {'num_workers':1, 'pin_memory':True, 'drop_last':True}
-ds_transforms = transforms.Compose([transforms.ToTensor(), rescaling])
 
 if 'mnist' in args.dataset:
     obs = (1, 28, 28)
-    dset = datasets.CIFAR10
-    if not args.nits:
+    dset = datasets.MNIST
+    ds_transforms = transforms.Compose([transforms.ToTensor(), rescaling])
+    dropout = 0.5
+    if args.no_nits:
         loss_op   = lambda real, fake : discretized_mix_logistic_loss_1d(real, fake)
         sample_op = lambda x : sample_from_discretized_mix_logistic_1d(x, args.nr_logistic_mix)
 
 elif 'cifar' in args.dataset:
     obs = (3, 32, 32)
     dset = datasets.CIFAR10
-    if not args.nits:
-        loss_op_t = loss_op = lambda real, fake : unstable_pixelcnn_loss(real, fake, bad_loss=False)
+    ds_transforms = transforms.Compose([transforms.ToTensor(), rescaling])
+    dropout = 0.5
+    if args.no_nits:
+        loss_op_t = loss_op = lambda real, fake : unstable_pixelcnn_loss(real, fake, bad_loss=False, discretize=args.discretized)
+        sample_op = lambda x : unstable_pixelcnn_sample(x, args.nr_logistic_mix, bad_loss=False, quantize=False)
+
+elif 'imagenet32' in args.dataset:
+    obs = (3, 32, 32)
+    dset = datasets.ImageNet
+    ds_transforms = transforms.Compose([transforms.ToTensor(), transforms.Resize(32), rescaling])
+    dropout = 0.0
+    if args.no_nits:
+        loss_op_t = loss_op = lambda real, fake : unstable_pixelcnn_loss(real, fake, bad_loss=False, discretize=args.discretized)
         sample_op = lambda x : unstable_pixelcnn_sample(x, args.nr_logistic_mix, bad_loss=False, quantize=False)
 else:
     raise Exception('{} dataset not in {mnist, cifar10}'.format(args.dataset))
@@ -139,7 +151,11 @@ test_loader  = torch.utils.data.DataLoader(dset(args.data_dir, train=False,
 
 assert np.isclose(1e-7, np.power(10., -7))
 
-if args.nits:
+if args.no_nits:
+    print('DEFAULT DISCRETIZED MoL')
+    # n_params = 100
+    n_params = 160
+else:
     print("NITS")
     nits_bound = 5
     arch = [1] + args.nits_arch
@@ -157,10 +173,6 @@ if args.nits:
     loss_op_t = lambda real, params: cnn_nits_loss(real, params, nits_model, discretized=args.discretized)
     sample_op = lambda params: cnn_nits_sample(params, nits_model)
     n_params = nits_model.tot_params
-else:
-    print('DEFAULT DISCRETIZED MoL')
-    # n_params = 100
-    n_params = 160
 
 # normalize step_weights
 step_weights = np.array(args.step_weights)
@@ -195,21 +207,23 @@ input_channels = obs[0]
 if args.attention == 'full':
     print("USING FACNN")
     model = FACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, n_params=n_params)
+                input_channels=input_channels, n_params=n_params, dropout=dropout)
     shadow = FACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, n_params=n_params)
+                input_channels=input_channels, n_params=n_params, dropout=dropout)
 elif args.attention == 'snail':
     print("USING SNAIL")
     model = ACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, n_params=n_params)
+                input_channels=input_channels, n_params=n_params, dropout=dropout)
     shadow = ACNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, n_params=n_params)
+                input_channels=input_channels, n_params=n_params, dropout=dropout)
 elif args.attention == '':
     print("USING PixelCNN")
     model = CNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, n_params=n_params, background=args.background)
+                input_channels=input_channels, n_params=n_params,
+                background=args.background, dropout=dropout)
     shadow = CNN(nr_resnet=args.nr_resnet, nr_filters=args.nr_filters,
-                input_channels=input_channels, n_params=n_params, background=args.background)
+                input_channels=input_channels, n_params=n_params,
+                background=args.background, dropout=dropout)
 
 def sample(model):
     with torch.no_grad():
@@ -245,7 +259,7 @@ else:
             break
 
 def standardize_loss(loss, batch_idx):
-    if not args.nits or args.discretized:
+    if args.no_nits or args.discretized:
         loss /= batch_idx * args.batch_size * np.prod(obs) * np.log(2.)
     else:
         loss /= batch_idx * args.batch_size
@@ -291,6 +305,7 @@ for epoch in range(args.load_epoch, args.max_epochs):
     # compute test loss
     model.eval()
     test_loss = 0.
+    test_ema_loss = 0.
     test_ae_loss = 0.
     with torch.no_grad():
         for batch_idx, (input,_) in enumerate(test_loader):
@@ -299,12 +314,17 @@ for epoch in range(args.load_epoch, args.max_epochs):
             test_loss += loss.detach().cpu().numpy()
             test_ae_loss += ae_loss.detach().cpu().numpy()
             del loss, ae_loss
+            model.train()
+            loss, _ = compute_loss(model, input, loss_op_t, test=True)
+            test_ema_loss += loss.detach().cpu().numpy()
+            model.eval()
+            del loss, ae_loss
 
     test_loss = standardize_loss(test_loss, batch_idx)
     test_ae_loss /= batch_idx * args.batch_size * np.prod(obs)
 
-    print('Epoch: {}, time: {:.2f}, train loss: {:.4f}, ae loss: {:.4f} | test loss: {:.4f}, ae loss: {:.4f}, lr: {:.2e}'.format(
-        epoch, time.time() - time_, train_loss, train_ae_loss, test_loss, test_ae_loss, optimizer.param_groups[0]['lr']))
+    print('Epoch: {}, time: {:.0f}, train loss: {:.3f}, ae loss: {:.3f} | test loss: {:.3f}, ema loss: {:.3f}, ae loss: {:.3f}, lr: {:.1e}'.format(
+        epoch, time.time() - time_, train_loss, train_ae_loss, test_loss, test_ema_loss, test_ae_loss, optimizer.param_groups[0]['lr']))
 
     if (epoch + 1) % args.save_interval == 0:
         print('sampling...')

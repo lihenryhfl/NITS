@@ -119,17 +119,17 @@ class Batcher:
         raise StopIteration
 
 class AttentionBlock(nn.Module):
-    def __init__(self, x_dim, num_filters, K=16):
+    def __init__(self, x_dim, num_filters, dropout, K=16):
         super(AttentionBlock, self).__init__()
         self.K = K
         self.V = num_filters // 2
-        self.grn_k = GatedResNet(x_dim * 3 + num_filters, NetworkInNetwork)
-        self.grn_q = GatedResNet(x_dim * 2 + num_filters, NetworkInNetwork)
-        self.grn_v = GatedResNet(x_dim * 3 + num_filters, NetworkInNetwork)
+        self.grn_k = GatedResNet(x_dim * 3 + num_filters, NetworkInNetwork, dropout=dropout)
+        self.grn_q = GatedResNet(x_dim * 2 + num_filters, NetworkInNetwork, dropout=dropout)
+        self.grn_v = GatedResNet(x_dim * 3 + num_filters, NetworkInNetwork, dropout=dropout)
         self.nin_k = NetworkInNetwork(x_dim * 3 + num_filters, self.K)
         self.nin_q = NetworkInNetwork(x_dim * 2 + num_filters, self.K)
         self.nin_v = NetworkInNetwork(x_dim * 3 + num_filters, self.V)
-        self.grn_out = GatedResNet(num_filters, NetworkInNetwork, skip_connection=0.5)
+        self.grn_out = GatedResNet(num_filters, NetworkInNetwork, skip_connection=0.5, dropout=dropout)
 
     def apply_causal_mask(self, x):
         return torch.tril(x, diagonal=-1)
@@ -191,7 +191,7 @@ def get_background(xs, device):
     return background
 
 class ACNN(nn.Module):
-    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, n_layers=12):
+    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, n_layers=12, dropout=0.5):
         super(ACNN, self).__init__()
 
         self.resnet_nonlinearity = concat_elu
@@ -203,9 +203,9 @@ class ACNN(nn.Module):
 
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
         self.layers = nn.ModuleList([ACNNLayer(nr_resnet, nr_filters,
-                                                self.resnet_nonlinearity) for _ in range(self.n_layers)])
+                                                self.resnet_nonlinearity, dropout) for _ in range(self.n_layers)])
 
-        self.att_layers = nn.ModuleList([AttentionBlock(input_channels, nr_filters) for _ in range(self.n_layers)])
+        self.att_layers = nn.ModuleList([AttentionBlock(input_channels, nr_filters, dropout) for _ in range(self.n_layers)])
 
         self.ul_init = nn.ModuleList([DownShiftedConv2d(input_channels + 1, nr_filters,
                                             filter_size=(1,3), shift_output_down=True),
@@ -235,11 +235,11 @@ class ACNN(nn.Module):
         return x_out
 
 class ACNNLayer(nn.Module):
-    def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity):
+    def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity, dropout):
         super(ACNNLayer, self).__init__()
         self.nr_resnet = nr_resnet
         self.ul_stream = nn.ModuleList([GatedResNet(nr_filters, DownRightShiftedConv2d,
-                                        resnet_nonlinearity, skip_connection=0)
+                                        resnet_nonlinearity, skip_connection=0, dropout=dropout)
                                             for _ in range(nr_resnet)])
 
     def forward(self, ul):
@@ -249,7 +249,7 @@ class ACNNLayer(nn.Module):
         return ul
 
 class FACNN(nn.Module):
-    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, half_att=True):
+    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, half_att=True, dropout=0.5):
         super(FACNN, self).__init__()
 
         self.resnet_nonlinearity = concat_elu
@@ -261,15 +261,15 @@ class FACNN(nn.Module):
 
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
         self.down_layers = nn.ModuleList([CNNLayerDown(down_nr_resnet[i], nr_filters,
-                                                self.resnet_nonlinearity) for i in range(3)])
+                                                self.resnet_nonlinearity, dropout) for i in range(3)])
 
         self.up_layers   = nn.ModuleList([CNNLayerUp(nr_resnet, nr_filters,
-                                                self.resnet_nonlinearity) for _ in range(3)])
+                                                self.resnet_nonlinearity, dropout) for _ in range(3)])
 
-        self.att_ul_layers = nn.ModuleList([AttentionBlock(input_channels, nr_filters)
+        self.att_ul_layers = nn.ModuleList([AttentionBlock(input_channels, nr_filters, dropout)
                                               for _ in range(6)])
         if not half_att:
-            self.att_u_layers = nn.ModuleList([AttentionBlock(input_channels, nr_filters)
+            self.att_u_layers = nn.ModuleList([AttentionBlock(input_channels, nr_filters, dropout)
                                                   for _ in range(6)])
 
         self.downsize_u_stream  = nn.ModuleList([DownShiftedConv2d(nr_filters, nr_filters,
@@ -351,7 +351,7 @@ def concat_elu(x):
     return F.elu(torch.cat([x, -x], dim=axis))
 
 class CNN(nn.Module):
-    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, background=False):
+    def __init__(self, nr_resnet=5, nr_filters=80, n_params=200, input_channels=3, background=False, dropout=0.5):
         super(CNN, self).__init__()
 
         self.resnet_nonlinearity = concat_elu
@@ -363,10 +363,10 @@ class CNN(nn.Module):
 
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
         self.down_layers = nn.ModuleList([CNNLayerDown(down_nr_resnet[i], nr_filters,
-                                                self.resnet_nonlinearity) for i in range(3)])
+                                                self.resnet_nonlinearity, dropout) for i in range(3)])
 
         self.up_layers   = nn.ModuleList([CNNLayerUp(nr_resnet, nr_filters,
-                                                self.resnet_nonlinearity) for _ in range(3)])
+                                                self.resnet_nonlinearity, dropout) for _ in range(3)])
 
         self.downsize_u_stream  = nn.ModuleList([DownShiftedConv2d(nr_filters, nr_filters,
                                                     stride=(2,2)) for _ in range(2)])
@@ -533,7 +533,7 @@ class DownRightShiftedDeconv2d(nn.Module):
 
 
 class GatedResNet(nn.Module):
-    def __init__(self, num_filters, conv_op, nonlinearity=concat_elu, skip_connection=0):
+    def __init__(self, num_filters, conv_op, nonlinearity=concat_elu, skip_connection=0, dropout=0.5):
         super(GatedResNet, self).__init__()
         self.skip_connection = skip_connection
         self.nonlinearity = nonlinearity
@@ -542,7 +542,7 @@ class GatedResNet(nn.Module):
         if skip_connection != 0:
             self.nin_skip = NetworkInNetwork(int(2 * skip_connection * num_filters), num_filters)
 
-        self.dropout = nn.Dropout2d(0.5)
+        self.dropout = nn.Dropout2d(dropout)
         self.conv_out = conv_op(2 * num_filters, 2 * num_filters)
 
 
@@ -558,15 +558,15 @@ class GatedResNet(nn.Module):
         return orig_x + c3
 
 class CNNLayerUp(nn.Module):
-    def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity):
+    def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity, dropout):
         super(CNNLayerUp, self).__init__()
         self.nr_resnet = nr_resnet
         self.u_stream  = nn.ModuleList([GatedResNet(nr_filters, DownShiftedConv2d,
-                                        resnet_nonlinearity, skip_connection=0)
+                                        resnet_nonlinearity, skip_connection=0, dropout=dropout)
                                             for _ in range(nr_resnet)])
 
         self.ul_stream = nn.ModuleList([GatedResNet(nr_filters, DownRightShiftedConv2d,
-                                        resnet_nonlinearity, skip_connection=1)
+                                        resnet_nonlinearity, skip_connection=1, dropout=dropout)
                                             for _ in range(nr_resnet)])
 
     def forward(self, u, ul):
@@ -582,16 +582,16 @@ class CNNLayerUp(nn.Module):
 
 
 class CNNLayerDown(nn.Module):
-    def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity):
+    def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity, dropout):
         super(CNNLayerDown, self).__init__()
         self.nr_resnet = nr_resnet
 
         self.u_stream  = nn.ModuleList([GatedResNet(nr_filters, DownShiftedConv2d,
-                                        resnet_nonlinearity, skip_connection=1)
+                                        resnet_nonlinearity, skip_connection=1, dropout=dropout)
                                             for _ in range(nr_resnet)])
 
         self.ul_stream = nn.ModuleList([GatedResNet(nr_filters, DownRightShiftedConv2d,
-                                        resnet_nonlinearity, skip_connection=2)
+                                        resnet_nonlinearity, skip_connection=2, dropout=dropout)
                                             for _ in range(nr_resnet)])
 
     def forward(self, u, ul, u_list, ul_list):
