@@ -1,3 +1,5 @@
+import matplotlib.pyplot as plt
+
 import torch
 import numpy as np
 from torch import nn
@@ -215,3 +217,30 @@ class ResMADEModel(nn.Module):
             data = self.proj(data, transpose=True)
 
         return data
+    
+    def pdf(self, x, dim, n=128):
+        assert len(x) == 1
+        shape = x.shape
+        xmin = self.nits_model.start[0, dim].item()
+        xmax = self.nits_model.end[0, dim].item()
+        
+        with torch.no_grad():
+            # obtain parameters
+            params = self.mlp(x)
+            data = x.tile((n,) + (1,) * (len(shape) - 1))
+            data[:, dim] = torch.linspace(xmin, xmax, n)
+            
+            pdf = self.nits_model.pdf(data, params)
+
+        return pdf[:, dim]
+    
+    def plot_pdf(self, x, dim, n=128):
+        shape = x.shape
+        xmin = self.nits_model.start[0, dim].item()
+        xmax = self.nits_model.end[0, dim].item()
+        
+        xval = torch.linspace(xmin, xmax, n)
+        yval = self.pdf(x, dim, n)
+        
+        plt.scatter(xval, yval.cpu())
+    

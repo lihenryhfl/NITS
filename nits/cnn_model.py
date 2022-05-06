@@ -23,9 +23,9 @@ def load_part_of_model(model, path, device=None):
     print('added %s of params:' % (added / float(len(model.state_dict().keys()))))
 
 def ll_to_bpd(ll, dataset='cifar', bits=8):
-    if dataset == 'cifar':
+    if 'cifar' in dataset:
         n_pixels = (32 ** 2) * 3
-    elif dataset == 'mnist':
+    elif 'mnist' in dataset:
         n_pixels = (28 ** 2)
 
     bpd = -((ll / n_pixels) - np.log(2 ** (bits - 1))) / np.log(2)
@@ -46,7 +46,7 @@ def cnn_nits_loss(x, params, nits_model, eps=1e-7, discretized=False, dequantize
         pre_cdf = nits_model.forward_
         pre_pdf = nits_model.backward_
 
-    if nits_model.pixelrnn:
+    if hasattr(nits_model, 'pixelrnn') and nits_model.pixelrnn:
         cdf = lambda x_, params: pre_cdf(x_, params, x_unrounded=x)
         pdf = lambda x_, params: pre_pdf(x_, params, x_unrounded=x)
     else:

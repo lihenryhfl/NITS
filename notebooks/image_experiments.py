@@ -12,6 +12,7 @@ from nits.model import ConditionalNITS
 from nits.cnn_model import *
 from nits.discretized_mol import mix_logistic_loss as unstable_pixelcnn_loss
 from nits.discretized_mol import sample_from_mix_logistic as unstable_pixelcnn_sample
+from nits.layer import DataLoader
 
 def list_str_to_list(s):
     print(s)
@@ -129,6 +130,21 @@ elif 'cifar' in args.dataset:
     if args.no_nits:
         loss_op_t = loss_op = lambda real, fake : unstable_pixelcnn_loss(real, fake, bad_loss=False, discretize=args.discretized)
         sample_op = lambda x : unstable_pixelcnn_sample(x, args.nr_logistic_mix, bad_loss=False, quantize=False)
+
+elif 'cifar1' in args.dataset:
+    obs = (3, 32, 32)
+    dset = datasets.CIFAR10
+    ds_transforms = transforms.Compose([transforms.ToTensor(), rescaling])
+    dropout = 0.5
+    if args.no_nits:
+        loss_op_t = loss_op = lambda real, fake : unstable_pixelcnn_loss(real, fake, bad_loss=False, discretize=args.discretized)
+        sample_op = lambda x : unstable_pixelcnn_sample(x, args.nr_logistic_mix, bad_loss=False, quantize=False)
+    for batch_idx, (data, _) in enumerate(train_loader):
+        data = data.cpu()
+        break
+
+    train_loader = DataLoader(data[0:1].tile((30000, 1, 1, 1)), batch_size=batch_size)
+    test_loader = DataLoader(data[0:1].tile((batch_size, 1, 1, 1)), batch_size=batch_size)
 
 elif 'imagenet32' in args.dataset:
     obs = (3, 32, 32)
@@ -272,6 +288,7 @@ class DataParallel(nn.DataParallel):
         return getattr(self.module, name)
 
 model = EMA(model, shadow, decay=args.polyak_decay).to(devices[0])
+# model = model.to(devices[0])
 if len(args.gpus) > 1:
     # model = DataParallel(model, device_ids=devices)
     model = nn.DataParallel(model, device_ids=devices)
@@ -290,7 +307,7 @@ for epoch in range(args.load_epoch, args.max_epochs):
 
         optimizer.step()
         scheduler.step()
-        model.module.update()
+        model.update()
 
         train_ae_loss += ae_loss.detach().cpu().numpy()
         train_loss += loss.detach().cpu().numpy()

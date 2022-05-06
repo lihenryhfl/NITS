@@ -8,6 +8,37 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn.utils import weight_norm as wn
 
+class Iterator:
+    def __init__(self, dataset, batch_size, n_batches):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.n_batches = n_batches
+        self.idx = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        start, end = self.idx * self.batch_size, (self.idx + 1) * self.batch_size
+        self.idx += 1
+        while self.idx < self.n_batches:
+            return self.dataset[start:end], None
+        else:
+            raise StopIteration
+
+class DataLoader:
+    def __init__(self, dataset, batch_size):
+        self.n_batches = len(dataset) // batch_size
+        self.batch_size = batch_size
+        self.dataset = dataset
+
+    def __iter__(self):
+        p = torch.randperm(len(self.dataset))
+        return Iterator(self.dataset[p], self.batch_size, self.n_batches)
+
+    def __len__(self):
+        return self.n_batches
+
 class EMA(nn.Module):
     def __init__(self, model: nn.Module, shadow: nn.Module, decay: float):
         super().__init__()
@@ -91,7 +122,7 @@ class Linear(nn.Module):
         if self.first_forward:
             x_ = self.linear(x, **kwargs)
             if self.channel_linear:
-                m, v = x_.mean(dim=(0,2,3)), x_.var(dim=(0,2,3))
+                m, v = x_.mean(dim=(0, 2, 3)), x_.var(dim=(0, 2, 3))
             else:
                 m, v = x_.mean(dim=(0,)), x_.var(dim=(0,))
             scale_init = 1 / (v + 1e-8).sqrt()

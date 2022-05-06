@@ -101,7 +101,7 @@ def sample_from_discretized_mix_logistic_1d(l, nr_mix):
     out = x0.unsqueeze(1)
     return out
 
-def mix_logistic_loss(x, l, bad_loss=False, discretize=True, dequantize=True):
+def mix_logistic_loss(x, l, bad_loss=False, discretized=True, dequantize=True):
     """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
     # Pytorch ordering
     x = x.permute(0, 2, 3, 1)
