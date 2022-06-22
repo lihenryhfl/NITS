@@ -182,20 +182,7 @@ class ResMADEModel(nn.Module):
         return new_params.reshape(-1, self.nits_model.tot_params)
         
     def forward(self, x):
-        if hasattr(self, 'normalizer'):
-            x = self.normalizer(x)
-        
-        # rotate x
-        x = self.proj(x)
-        
-        # obtain parameters
-        params = self.mlp(x)
-        
-        if hasattr(self, 'normalizer'):
-            params = self.add_normalizer_weights(params)
-        
-        # compute log likelihood
-        ll = (self.nits_model.pdf(x, params) + 1e-10).log().sum()
+        ll = self.pdf(x).log().sum()
         
         return ll
     
@@ -218,7 +205,25 @@ class ResMADEModel(nn.Module):
 
         return data
     
-    def pdf(self, x, dim, n=128):
+    def pdf(self, x):
+        if hasattr(self, 'normalizer'):
+            x = self.normalizer(x)
+        
+        # rotate x
+        x = self.proj(x)
+        
+        # obtain parameters
+        params = self.mlp(x)
+        
+        if hasattr(self, 'normalizer'):
+            params = self.add_normalizer_weights(params)
+        
+        # compute log likelihood
+        pdf = (self.nits_model.pdf(x, params) + 1e-10)
+        
+        return pdf
+    
+    def lin_pdf(self, x, dim, n=128):
         assert len(x) == 1
         shape = x.shape
         xmin = self.nits_model.start[0, dim].item()
@@ -240,7 +245,7 @@ class ResMADEModel(nn.Module):
         xmax = self.nits_model.end[0, dim].item()
         
         xval = torch.linspace(xmin, xmax, n)
-        yval = self.pdf(x, dim, n)
+        yval = self.lin_pdf(x, dim, n)
         
         plt.scatter(xval, yval.cpu())
     

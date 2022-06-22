@@ -34,7 +34,7 @@ class NITSPrimitive(nn.Module):
     def __init__(self, arch, start=0., end=1., A_constraint='neg_exp',
                  monotonic_const=1e-6, activation='sigmoid',
                  final_layer_constraint='softmax', non_conditional_dim=0,
-                 add_residual_connections=False, pixelrnn=False,
+                 add_residual_connections=False, combine_channels=False,
                  softmax_temperature=True, normalize_inverse=True,
                  bisection_eps=1e-6):
         super(NITSPrimitive, self).__init__()
@@ -45,17 +45,18 @@ class NITSPrimitive(nn.Module):
         self.last_layer = len(arch) - 2
         self.activation = activation
         self.add_residual_connections = add_residual_connections
-        self.pixelrnn = pixelrnn
+        self.combine_channels = combine_channels
         self.softmax_temperature = softmax_temperature
         self.normalize_inverse = normalize_inverse
         self.bisection_eps = bisection_eps
 
         # count parameters
         self.n_params = 0
+        self.d = int(arch[0])
 
-        if pixelrnn:
-            assert arch[0] == 1
-            self.n_params += 3 * arch[1]
+        if combine_channels:
+            arch[0] = 1
+            self.n_params += self.d * arch[1]
 
         for i, (a1, a2) in enumerate(zip(arch[:-1], arch[1:])):
             self.n_params += (a1 * a2)
@@ -66,8 +67,7 @@ class NITSPrimitive(nn.Module):
             self.n_params += 1 # softmax temperature
 
         # set start and end tensors
-        self.d = arch[0]
-        assert non_conditional_dim < self.d or pixelrnn
+        assert non_conditional_dim < self.d, '{}, {}'.format(non_conditional_dim, self.d)
         self.non_conditional_dim = non_conditional_dim
         self.register_buffer('start_val', torch.tensor(start))
         self.register_buffer('end_val', torch.tensor(end))
@@ -126,9 +126,9 @@ class NITSPrimitive(nn.Module):
         x = x.clone()
         prev_x = monotonic_x = x[:,self.non_conditional_dim].unsqueeze(-1)
 
-        if self.pixelrnn:
-            cur_idx = 3 * self.arch[1]
-            linear_weights = params[:,:cur_idx].reshape(-1, 3, self.arch[1]).tanh()
+        if self.combine_channels:
+            cur_idx = self.d * self.arch[1]
+            linear_weights = params[:,:cur_idx].reshape(-1, self.d, self.arch[1]).tanh()
             x_masked = x_unrounded.clone() if x_unrounded is not None else x.clone()
             dim = self.non_conditional_dim
             x_masked = torch.cat([x_masked[:,:dim], torch.zeros_like(x_masked)[:,dim:]], axis=1)
@@ -153,7 +153,7 @@ class NITSPrimitive(nn.Module):
             if i < self.last_layer or self.final_layer_constraint != 'softmax':
                 b_end = A_end + out_features
                 b = params[:, A_end:b_end].reshape(-1, out_features)
-                if i == 0 and self.pixelrnn:
+                if i == 0 and self.combine_channels:
                     b = b + b_linear
                 bs.append(b)
                 cur_idx = b_end
@@ -247,7 +247,7 @@ class NITSPrimitive(nn.Module):
         nonlinearities.reverse()
         residuals.reverse()
 
-        if self.pixelrnn:
+        if self.combine_channels:
             return grad
         else:
             # we only want gradients w.r.t. the first input dimension
@@ -341,13 +341,13 @@ class NITSPrimitive(nn.Module):
         return x_hat
 
 class NITS(nn.Module):
-    def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
+    def __init__(self, arch, start=-2., end=2., A_constraint='neg_exp',
                  monotonic_const=1e-2, final_layer_constraint='softmax',
                  add_residual_connections=False, normalize_inverse=True,
                  softmax_temperature=True, share_mixture_components=False,
                  bisection_eps=1e-6):
         super(NITS, self).__init__()
-        self.d = d
+        self.d = arch[0]
         self.final_layer_constraint = final_layer_constraint
         self.add_residual_connections = add_residual_connections
         self.normalize_inverse = normalize_inverse
@@ -479,35 +479,35 @@ class ConditionalNITS(nn.Module):
     # TODO: for now, just implement ConditionalNITS such that it sequentially evaluates each dimension
     # this process is (probably) possible to vectorize, but since we're currently only doing 3 dimensions,
     # there's no need to speed things up, because we only gain a factor of 3 speedup
-    def __init__(self, d, arch, start=-2., end=2., A_constraint='neg_exp',
-                 monotonic_const=1e-2, final_layer_constraint='softmax',
-                 autoregressive=True, pixelrnn=False, normalize_inverse=True,
-                 add_residual_connections=False, softmax_temperature=True,
+    def __init__(self, arch, start=-3., end=3., A_constraint='neg_exp',
+                 monotonic_const=1e-6, final_layer_constraint='softmax',
+                 autoregressive=True, combine_channels=False, normalize_inverse=True,
+                 add_residual_connections=False, softmax_temperature=False,
                  bisection_eps=1e-4, share_mixture_components=True):
         super(ConditionalNITS, self).__init__()
 
-        self.d = d
+        self.d = arch[0]
         self.final_layer_constraint = final_layer_constraint
         self.autoregressive = autoregressive
         self.add_residual_connections = add_residual_connections
 
-        self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, d))
-        self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, d))
+        self.register_buffer('start', torch.tensor(start).reshape(1, 1).tile(1, self.d))
+        self.register_buffer('end', torch.tensor(end).reshape(1, 1).tile(1, self.d))
 
-        self.pixelrnn = pixelrnn
+        self.combine_channels = combine_channels
         self.normalize_inverse = normalize_inverse
         self.softmax_temperature = softmax_temperature
         self.bisection_eps = bisection_eps
         self.share_mixture_components = share_mixture_components
 
-        assert arch[0] == d or pixelrnn
+        assert arch[0] == self.d
         self.nits_list = torch.nn.ModuleList()
         for i in range(self.d):
-            model = NITSPrimitive(arch=arch, start=start, end=end,
+            model = NITSPrimitive(arch=arch.copy(), start=start, end=end,
                                   A_constraint=A_constraint,
                                   monotonic_const=monotonic_const,
                                   final_layer_constraint=final_layer_constraint,
-                                  non_conditional_dim=i, pixelrnn=pixelrnn,
+                                  non_conditional_dim=i, combine_channels=combine_channels,
                                   normalize_inverse=normalize_inverse,
                                   add_residual_connections=add_residual_connections,
                                   softmax_temperature=softmax_temperature,
@@ -515,7 +515,7 @@ class ConditionalNITS(nn.Module):
             self.nits_list.append(model)
 
         self.n_components = arch[-2]
-        if pixelrnn and self.share_mixture_components:
+        if combine_channels and self.share_mixture_components:
             self.tot_params = sum([m.n_params for m in self.nits_list]) - self.n_components * 2
             self.n_params = self.nits_list[0].n_params - self.n_components
         else:
@@ -529,7 +529,7 @@ class ConditionalNITS(nn.Module):
         return x
 
     def get_params(self, params, i):
-        if self.pixelrnn and self.share_mixture_components:
+        if self.combine_channels and self.share_mixture_components:
             start_idx, end_idx = self.n_components + i * self.n_params, self.n_components + (i + 1) * self.n_params
             return torch.cat([params[:,start_idx:end_idx], params[:,:self.n_components]], axis=1)
         else:
@@ -651,10 +651,10 @@ if __name__ == "__main__":
             assert (z - icdf <= 1e-3).all()
 
     d = 3
-    for pixelrnn in [True, False]:
+    for combine_channels in [True, False]:
         for base_arch in [[10, 1], [10, 10, 1]]:
-            arch = [1] + base_arch if pixelrnn else [d] + base_arch
-            model = ConditionalNITS(d=d, arch=arch, pixelrnn=pixelrnn, start=start, end=end)
+            arch = [1] + base_arch if combine_channels else [d] + base_arch
+            model = ConditionalNITS(d=d, arch=arch, combine_channels=combine_channels, start=start, end=end)
             params = torch.randn((n, model.tot_params), device=device)
             x = torch.randn((n, d), device=device)
 
@@ -704,14 +704,14 @@ if __name__ == "__main__":
     c_model = ConditionalNITS(d=3, start=start, end=end, arch=[1, 10, 1],
                               monotonic_const=0.,
                               autoregressive=True,
-                              pixelrnn=True,
+                              combine_channels=True,
                               normalize_inverse=False,
                               softmax_temperature=False).to(device)
 
     c_params = torch.randn(batch_size, c_model.tot_params, 2, 2, device=device)
     z = torch.rand(batch_size, 3, 2, 2, device=device) * 2 - 1
 
-    # make sure outputs align with pixelrnn
+    # make sure outputs align with combine_channels
     loss1 = mix_logistic_loss(z, c_params, bad_loss=True, discretized=True)
     loss2 = cnn_nits_loss(z, c_params, c_model, discretized=True)
 
@@ -730,10 +730,10 @@ if __name__ == "__main__":
     assert (z - icdf_).abs().max() < 1e-2
 
 
-    # test icdf, when normalize_inverse == True (i.e. not EXACTLY pixelrnn anymore)
+    # test icdf, when normalize_inverse == True (i.e. not EXACTLY combine_channels anymore)
     c_model = ConditionalNITS(d=3, start=start, end=end, arch=[1, 10, 1],
                               monotonic_const=0.,
-                              autoregressive=True, pixelrnn=True,
+                              autoregressive=True, combine_channels=True,
                               normalize_inverse=True).to(device)
 
     # make sure that cdf and icdf return the correct result

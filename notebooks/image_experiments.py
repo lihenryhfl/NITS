@@ -335,7 +335,7 @@ for epoch in range(args.load_epoch, args.max_epochs):
             loss, _ = compute_loss(model, input, loss_op_t, test=True)
             test_ema_loss += loss.detach().cpu().numpy()
             model.eval()
-            del loss, ae_loss
+            del loss
 
     test_loss = standardize_loss(test_loss, batch_idx)
     test_ae_loss /= batch_idx * args.batch_size * np.prod(obs)

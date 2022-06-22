@@ -121,47 +121,6 @@ class MaskedResidualBlock(nn.Module):
         return temps + inputs
 
 
-class MADE(nn.Module):
-    def __init__(self, input_dim, n_hidden_layers, hidden_dim, output_dim_multiplier,
-                 conditional=False, conditioning_dim=None, activation=F.relu):
-        super().__init__()
-        self.input_dim = input_dim
-        self.output_dim_multiplier = output_dim_multiplier
-        self.conditional = conditional
-
-        self.initial_layer = MaskedLinear(
-            input_dim,
-            hidden_dim,
-            input_dim,
-            kind='input'
-        )
-        if conditional:
-            assert conditioning_dim is not None, 'Dimension of condition variables must be specified.'
-            self.conditional_layer = nn.Linear(conditioning_dim, hidden_dim)
-        self.hidden_layers = nn.ModuleList(
-            [MaskedLinear(hidden_dim, hidden_dim, input_dim)
-             for _ in range(n_hidden_layers)]
-        )
-        self.final_layer = MaskedLinear(
-            hidden_dim, input_dim * output_dim_multiplier,
-            input_dim,
-            kind='output'
-        )
-
-        self.activation = activation
-
-    def forward(self, inputs, conditional_inputs=None):
-        temps = self.initial_layer(inputs)
-        if self.conditional:
-            temps += self.conditional_layer(conditional_inputs)
-        temps = self.activation(temps)
-        for layer in self.hidden_layers:
-            temps = layer(temps)
-            temps = self.activation(temps)
-        outputs = self.final_layer(temps)
-        return outputs
-
-
 class ResidualMADE(nn.Module):
     def __init__(self, input_dim, n_residual_blocks, hidden_dim,
                  output_dim_multiplier, conditional=False, conditioning_dim=None,

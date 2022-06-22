@@ -46,7 +46,7 @@ class EMA(nn.Module):
 
         self.model = model
         self.shadow = shadow
-
+        
         self.update(copy_all=True)
 
         for param in self.shadow.parameters():
@@ -80,13 +80,28 @@ class EMA(nn.Module):
             # buffers are copied
             shadow_buffers[name].copy_(buffer)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    def forward(self, *args):
         if self.training:
-            return self.model(inputs)
+            return self.model(*args)
         else:
-            return self.shadow(inputs)
+            return self.shadow(*args)
+        
+#     def __setattr__(self, attr):
+#         print(attr)
+#         self.__dict
+            
+#         return getattr(obj, attr)
+        
+    def __getattr__(self, attr):
+        try:
+            return super().__getattr__(attr)
+        except AttributeError as e:
+            if self.training:
+                obj = super().__getattr__('model')
+            else:
+                obj = super().__getattr__('shadow')
 
-
+            return getattr(obj, attr)
 
 class ChannelLinear(nn.Module):
     def __init__(self, dim_in, dim_out):
