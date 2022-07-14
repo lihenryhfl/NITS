@@ -5,6 +5,8 @@ from torch import nn
 from torch.nn import functional as F, init
 from torch.nn.utils import weight_norm as wn
 
+# parts adapted from https://github.com/conormdurkan/autoregressive-energy-machines
+
 def tile(x, n):
     assert isinstance(n, int) and n > 0, 'Argument \'n\' must be an integer.'
     return x.unsqueeze(-1).tile((1, n)).reshape(-1)
