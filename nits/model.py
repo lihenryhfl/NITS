@@ -347,7 +347,8 @@ class NITS(nn.Module):
                  softmax_temperature=True, share_mixture_components=False,
                  bisection_eps=1e-6):
         super(NITS, self).__init__()
-        self.d = arch[0]
+        d = self.d = int(arch[0])
+        arch[0] = 1
         self.final_layer_constraint = final_layer_constraint
         self.add_residual_connections = add_residual_connections
         self.normalize_inverse = normalize_inverse
@@ -500,7 +501,6 @@ class ConditionalNITS(nn.Module):
         self.bisection_eps = bisection_eps
         self.share_mixture_components = share_mixture_components
 
-        assert arch[0] == self.d
         self.nits_list = torch.nn.ModuleList()
         for i in range(self.d):
             model = NITSPrimitive(arch=arch.copy(), start=start, end=end,
@@ -625,8 +625,8 @@ if __name__ == "__main__":
         assert((out1 - out2).norm() < 1e-5)
 
     for d in [1, 5]:
-        for arch in [[1, 10, 1], [1, 10, 10, 1]]:
-            model = NITS(d=d, arch=arch, start=start, end=end)
+        for arch in [[d, 10, 1], [d, 10, 10, 1]]:
+            model = NITS(arch=arch, start=start, end=end)
             params = torch.randn((n, model.tot_params), device=device)
             x = torch.randn((n, d), device=device)
 
@@ -653,8 +653,8 @@ if __name__ == "__main__":
     d = 3
     for combine_channels in [True, False]:
         for base_arch in [[10, 1], [10, 10, 1]]:
-            arch = [1] + base_arch if combine_channels else [d] + base_arch
-            model = ConditionalNITS(d=d, arch=arch, combine_channels=combine_channels, start=start, end=end)
+            arch = [d] + base_arch if combine_channels else [d] + base_arch
+            model = ConditionalNITS(arch=arch, combine_channels=combine_channels, start=start, end=end)
             params = torch.randn((n, model.tot_params), device=device)
             x = torch.randn((n, d), device=device)
 
@@ -671,7 +671,7 @@ if __name__ == "__main__":
     print("Testing single-channel NITS-Conv.")
 
     model = NITS(
-        d=1, start=-1e5, end=1e5, arch=[1, 10, 1],
+        start=-1e5, end=1e5, arch=[1, 10, 1],
         monotonic_const=0., A_constraint='neg_exp',
         final_layer_constraint='softmax',
         softmax_temperature=False).to(device)
@@ -684,7 +684,7 @@ if __name__ == "__main__":
     assert (loss1 - loss2).norm() < 1e-2, (loss1 - loss2).norm()
 
     model = NITS(
-        d=1, start=-1e5, end=1e5, arch=[1, 10, 1],
+        start=-1e5, end=1e5, arch=[1, 10, 1],
         monotonic_const=0., A_constraint='neg_exp',
         final_layer_constraint='softmax',
         softmax_temperature=False).to(device)
@@ -701,7 +701,7 @@ if __name__ == "__main__":
     start, end = -2., 2.
     batch_size = 1024
 
-    c_model = ConditionalNITS(d=3, start=start, end=end, arch=[1, 10, 1],
+    c_model = ConditionalNITS(start=start, end=end, arch=[3, 10, 1],
                               monotonic_const=0.,
                               autoregressive=True,
                               combine_channels=True,
@@ -717,7 +717,8 @@ if __name__ == "__main__":
 
     dist_per_dim = (loss1 - loss2).abs() / np.prod(z.shape)
 
-    assert dist_per_dim < 1e-5, dist_per_dim
+    assert dist_per_dim < 1e-5, 'loss1: {}, loss2: {}, dist_per_dim: {}, z.shape: {}'.format(
+        loss1, loss2, dist_per_dim, z.shape)
 
     # make sure that cdf and icdf return the correct result
     c_params = torch.randn(batch_size, c_model.tot_params, device=device)
@@ -726,12 +727,11 @@ if __name__ == "__main__":
     icdf_ = c_model.icdf(cdf_, c_params)
 
     assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
-    assert (cdf_ <= 1.).all() and (cdf_ >= 0).all()
     assert (z - icdf_).abs().max() < 1e-2
 
 
     # test icdf, when normalize_inverse == True (i.e. not EXACTLY combine_channels anymore)
-    c_model = ConditionalNITS(d=3, start=start, end=end, arch=[1, 10, 1],
+    c_model = ConditionalNITS(start=start, end=end, arch=[3, 10, 1],
                               monotonic_const=0.,
                               autoregressive=True, combine_channels=True,
                               normalize_inverse=True).to(device)

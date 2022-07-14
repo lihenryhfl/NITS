@@ -52,7 +52,7 @@ def cnn_nits_loss(x, params, nits_model, eps=1e-7, discretized=False, dequantize
         pre_cdf = nits_model.forward_
         pre_pdf = nits_model.backward_
 
-    if hasattr(nits_model, 'pixelrnn') and nits_model.pixelrnn:
+    if hasattr(nits_model, 'combine_channels') and nits_model.combine_channels:
         cdf = lambda x_, params: pre_cdf(x_, params, x_unrounded=x)
         pdf = lambda x_, params: pre_pdf(x_, params, x_unrounded=x)
     else:
@@ -370,7 +370,7 @@ class ACNN(nn.Module):
 
 def concat_elu(x):
     axis = len(x.size()) - 3
-    return F.elu(torch.cat([x, -x], dim=axis))
+    return F.silu(torch.cat([x, -x], dim=axis))
 
 class CNN(nn.Module):
     def __init__(
@@ -381,6 +381,7 @@ class CNN(nn.Module):
         input_channels=3, 
         background=False, 
         dropout=0.5,
+        depth=3,
         h_shape=(0,)
     ):
         super(CNN, self).__init__()
@@ -389,32 +390,34 @@ class CNN(nn.Module):
 
         self.nr_filters = nr_filters
         self.input_channels = input_channels
+        self.h_shape = h_shape
         self.n_params = n_params
         self.background = background
+        self.depth = depth
 
         down_nr_resnet = [nr_resnet] + [nr_resnet + 1] * 2
         self.down_layers = nn.ModuleList([CNNLayerDown(down_nr_resnet[i], nr_filters,
-                                                self.resnet_nonlinearity, dropout, h_shape=h_shape) for i in range(3)])
+                                                self.resnet_nonlinearity, dropout, h_shape=h_shape) for i in range(depth)])
 
         self.up_layers   = nn.ModuleList([CNNLayerUp(nr_resnet, nr_filters,
-                                                self.resnet_nonlinearity, dropout, h_shape=h_shape) for _ in range(3)])
+                                                self.resnet_nonlinearity, dropout, h_shape=h_shape) for _ in range(depth)])
 
         self.downsize_u_stream  = nn.ModuleList([DownShiftedConv2d(nr_filters, nr_filters,
-                                                    stride=(2,2)) for _ in range(2)])
+                                                    stride=(2,2)) for _ in range(depth - 1)])
 
         self.downsize_ul_stream = nn.ModuleList([DownRightShiftedConv2d(nr_filters,
-                                                    nr_filters, stride=(2,2)) for _ in range(2)])
+                                                    nr_filters, stride=(2,2)) for _ in range(depth - 1)])
 
         self.upsize_u_stream  = nn.ModuleList([DownShiftedDeconv2d(nr_filters, nr_filters,
-                                                    stride=(2,2)) for _ in range(2)])
+                                                    stride=(2,2)) for _ in range(depth - 1)])
 
         self.upsize_ul_stream = nn.ModuleList([DownRightShiftedDeconv2d(nr_filters,
-                                                    nr_filters, stride=(2,2)) for _ in range(2)])
+                                                    nr_filters, stride=(2,2)) for _ in range(depth - 1)])
 
         # input shape is slightly different due to various types of padding
         padded_input_channels = input_channels + 7 if background else input_channels + 1
 
-        self.u_init = DownShiftedConv2d(padded_input_channels, nr_filters, filter_size=(2,3),
+        self.u_init = DownShiftedConv2d(padded_input_channels, nr_filters, filter_size=(2, 3),
                         shift_output_down=True)
 
         self.ul_init = nn.ModuleList([DownShiftedConv2d(padded_input_channels, nr_filters,
@@ -438,26 +441,26 @@ class CNN(nn.Module):
 
         u_list  = [self.u_init(x)]
         ul_list = [self.ul_init[0](x) + self.ul_init[1](x)]
-        for i in range(3):
+        for i in range(self.depth):
             u_out, ul_out = self.up_layers[i](u_list[-1], ul_list[-1], h=h)
             u_list  += u_out
             ul_list += ul_out
 
-            if i != 2:
+            if i != self.depth - 1:
                 u_list  += [self.downsize_u_stream[i](u_list[-1])]
                 ul_list += [self.downsize_ul_stream[i](ul_list[-1])]
 
         u  = u_list.pop()
         ul = ul_list.pop()
 
-        for i in range(3):
+        for i in range(self.depth):
             u, ul = self.down_layers[i](u, ul, u_list, ul_list, h=h)
 
-            if i != 2 :
+            if i != self.depth - 1:
                 u  = self.upsize_u_stream[i](u)
                 ul = self.upsize_ul_stream[i](ul)
 
-        x_out = self.nin_out(F.elu(ul))
+        x_out = self.nin_out(F.silu(ul))
 
         assert len(u_list) == len(ul_list) == 0, pdb.set_trace()
 
@@ -491,13 +494,19 @@ class NetworkInNetwork(nn.Module):
 
 class DownShiftedConv2d(nn.Module):
     def __init__(self, num_filters_in, num_filters_out, filter_size=(2,3), stride=(1, 1),
-                    shift_output_down=False, norm='weight_norm'):
+                    shift_output_down=False, norm='group_norm'):
         super(DownShiftedConv2d, self).__init__()
 
-        assert norm in [None, 'batch_norm', 'weight_norm']
-        self.conv = Conv2d(num_filters_in, num_filters_out, filter_size, stride)
+        assert norm in [None, 'batch_norm', 'weight_norm', 'group_norm']
+        conv_op = Conv2d if norm == 'weight_norm' else nn.Conv2d
+        self.conv = conv_op(num_filters_in, num_filters_out, filter_size, stride)
         self.shift_output_down = shift_output_down
         self.norm = norm
+        if norm == 'group_norm':
+            self.norm_op = nn.GroupNorm(num_groups=min(num_filters_out // 4, 32),
+                                        num_channels=num_filters_out, eps=1e-6)
+        elif norm == 'batch_norm':
+            self.norm_op = nn.BatchNorm2d(num_filters_in)
         # arguments of zeropad2d: padding_left, padding_right, padding_top, padding_bottom
         # therefore, for filter_size = (2, 3), this pads 1 left, 1 right, 1 above, and 0 below
         self.pad  = nn.ZeroPad2d((int((filter_size[1] - 1) / 2),
@@ -508,7 +517,8 @@ class DownShiftedConv2d(nn.Module):
     def forward(self, x):
         x = self.pad(x)
         x = self.conv(x)
-        x = self.bn(x) if self.norm == 'batch_norm' else x
+        if self.norm in ['batch_norm', 'group_norm']:
+            x = self.norm_op(x)
         return down_shift(x) if self.shift_output_down else x
 
 
@@ -529,21 +539,29 @@ class DownShiftedDeconv2d(nn.Module):
 
 class DownRightShiftedConv2d(nn.Module):
     def __init__(self, num_filters_in, num_filters_out, filter_size=(2,2), stride=(1,1),
-                    shift_output_right=False, norm='weight_norm'):
+                    shift_output_right=False, norm='group_norm'):
         super(DownRightShiftedConv2d, self).__init__()
 
-        assert norm in [None, 'batch_norm', 'weight_norm']
+        assert norm in [None, 'batch_norm', 'weight_norm', 'group_norm']
         # arguments of zeropad2d: padding_left, padding_right, padding_top, padding_bottom
         # therefore, for filter_size = (2, 2), this pads 1 left, 0 right, 1 above, and 0 below
         self.pad = nn.ZeroPad2d((filter_size[1] - 1, 0, filter_size[0] - 1, 0))
-        self.conv = Conv2d(num_filters_in, num_filters_out, filter_size, stride=stride)
+        conv_op = Conv2d if norm == 'weight_norm' else nn.Conv2d
+        self.conv = conv_op(num_filters_in, num_filters_out, filter_size, stride)
         self.shift_output_right = shift_output_right
         self.norm = norm
+        
+        if norm == 'group_norm':
+            self.norm_op = nn.GroupNorm(num_groups=min(num_filters_out // 4, 32),
+                                        num_channels=num_filters_out, eps=1e-6)
+        elif norm == 'batch_norm':
+            self.norm_op = nn.BatchNorm2d(num_filters_in)
 
     def forward(self, x):
         x = self.pad(x)
         x = self.conv(x)
-        x = self.bn(x) if self.norm == 'batch_norm' else x
+        if self.norm in ['batch_norm', 'group_norm']:
+            x = self.norm_op(x)
         return right_shift(x) if self.shift_output_right else x
 
 
@@ -610,9 +628,9 @@ class GatedResNet(nn.Module):
             h = self.dropout(self.nonlinearity(h))
             h = self.h_out(h)
             x += h
-        a, b = torch.chunk(x, 2, dim=1)
-        c3 = a * b.sigmoid()
-        return orig_x + c3
+        chunks = torch.chunk(x, 2, dim=1)
+        x = chunks[0] * chunks[1].sigmoid()
+        return orig_x + x
 
 class CNNLayerUp(nn.Module):
     def __init__(self, nr_resnet, nr_filters, resnet_nonlinearity, dropout, h_shape=(0,)):

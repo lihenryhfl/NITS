@@ -96,21 +96,21 @@ elif 'bsds300' in args.dataset :
 
 # INITIALIZE NITS MODEL
 if 'mnist' in args.dataset:
-    arch = [1] + args.nits_arch
-    nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-7,
+    arch = [obs[0]] + args.nits_arch
+    nits_model = NITS(start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-7,
                       A_constraint=args.constraint, arch=arch,
                       final_layer_constraint=args.final_constraint,
                       softmax_temperature=args.softmax_temp).to(device)
 elif 'cifar' in args.dataset:
-    arch = [1] + args.nits_arch
-    nits_model = ConditionalNITS(d=3, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-7,
+    arch = [obs[0]]  + args.nits_arch
+    nits_model = ConditionalNITS(start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-7,
                                  A_constraint=args.constraint, arch=arch, autoregressive=True,
                                  pixelrnn=True, normalize_inverse=args.normalize_inverse,
                                  final_layer_constraint=args.final_constraint,
                                  softmax_temperature=args.softmax_temp).to(device)
 elif 'bsds300' in args.dataset:
-    arch = [1] + args.nits_arch
-    nits_model = NITS(d=1, start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-7,
+    arch = [obs[0]]  + args.nits_arch
+    nits_model = NITS(start=-args.nits_bound, end=args.nits_bound, monotonic_const=1e-7,
                       A_constraint=args.constraint, arch=arch, normalize_inverse=args.normalize_inverse,
                       final_layer_constraint=args.final_constraint,
                       softmax_temperature=args.softmax_temp).to(device)
@@ -135,7 +135,8 @@ model = model.to(device)
 # model_name = 'lr_{:.5f}_nits_arch{}_constraint{}_final_constraint{}_softmax_temperature{}_attention{}'.format(
 #     args.lr, str(args.nits_arch).replace(' ', ''), args.constraint, args.final_constraint,
 #     args.softmax_temp, args.attention)
-model_name = 'normalize_inverse{}_nits_arch{}_discretized{}_softmax_temperature{}_attention{}'.format(
+model_name = 'data{}normalize_inverse{}_nits_arch{}_discretized{}_softmax_temperature{}_attention{}'.format(
+    args.dataset,
     args.normalize_inverse, str(args.nits_arch).replace(' ', '').replace(',', '_')[1:-1],
     args.discretized, args.softmax_temp, args.attention)
 
@@ -228,4 +229,6 @@ for epoch in range(args.max_epochs):
         sample_t = rescaling_inv(sample_t)
         utils.save_image(sample_t,'/data/image_model/images/{}_{}.png'.format(model_name, epoch),
                 nrow=5, padding=0)
+
+
 
