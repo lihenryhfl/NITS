@@ -38,7 +38,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-d', '--dataset', type=str, default='gas')
 parser.add_argument('-g', '--gpu', type=str, default='')
 parser.add_argument('-b', '--batch_size', type=int, default=1024)
-parser.add_argument('-hi', '--hidden_dim', type=int, default=512)
+parser.add_argument('-hi', '--hidden_dim', type=int, default=1024)
 parser.add_argument('-nr', '--n_residual_blocks', type=int, default=4)
 parser.add_argument('-n', '--patience', type=int, default=-1)
 parser.add_argument('-ga', '--gamma', type=float, default=1)
@@ -66,16 +66,20 @@ if args.dataset == 'gas':
 elif args.dataset == 'power':
     # training set size: 1,659,917
     data = power.POWER()
-    default_dropout = 0.1
+    default_dropout = 0.4
 elif args.dataset == 'miniboone':
     # training set size: 29,556
     data = miniboone.MINIBOONE()
     default_dropout = 0.3
+    args.hidden_dim = 128
+    args.batch_size = 128
 elif args.dataset == 'hepmass':
     # training set size: 315,123
     data = hepmass.HEPMASS()
-    default_dropout = 0.5
-    default_pateince = 3
+    default_dropout = 0.3
+    default_patience = 3
+    args.hidden_dim = 512
+    args.batch_size = 1024
 elif args.dataset == 'bsds300':
     # training set size: 1,000,000
     data = bsds300.BSDS300()
