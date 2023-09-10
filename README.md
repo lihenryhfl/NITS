@@ -1,5 +1,5 @@
 # NITS
-Neural Inverse Transform Sampler
+Neural Inverse Transform Sampler (presented at ICML 2022). Paper at: https://proceedings.mlr.press/v162/li22j.
 
 To install nits as a local, editable python module, please run
 ```
